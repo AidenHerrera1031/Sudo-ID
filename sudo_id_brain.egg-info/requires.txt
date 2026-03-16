@@ -1,0 +1,7 @@
+chromadb
+openai
+python-dotenv
+watchdog
+
+[:python_version < "3.11"]
+tomli

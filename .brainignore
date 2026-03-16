@@ -1,0 +1,7 @@
+# Patterns excluded by `brain sync` and `brain watch`
+# Supports *, ?, **, and ! negation.
+#
+# Examples:
+# docs/archive/**
+# *.log
+# generated/

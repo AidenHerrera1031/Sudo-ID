@@ -1,3 +1,15 @@
+Metadata-Version: 2.4
+Name: sudo-id-brain
+Version: 0.2.0
+Summary: Terminal-first project memory sidecar for code and Codex session context.
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: chromadb
+Requires-Dist: openai
+Requires-Dist: python-dotenv
+Requires-Dist: watchdog
+Requires-Dist: tomli; python_version < "3.11"
+
 # Sudo-ID
 
 Terminal-first project memory sidecar for local code + Codex session context.

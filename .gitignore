@@ -1,0 +1,5 @@
+.env
+.codex_brain/
+.venv/
+__pycache__/
+*.pyc

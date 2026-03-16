@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sudo-id-brain"
+version = "0.2.0"
+description = "Terminal-first project memory sidecar for code and Codex session context."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "chromadb",
+  "openai",
+  "python-dotenv",
+  "watchdog",
+  "tomli; python_version < '3.11'",
+]
+
+[project.scripts]
+brain = "brain_cli:main"
+brain-start = "brain_cli:start_main"
+brain-tui = "brain_cli:tui_main"
+brain-init = "brain_cli:init_main"
+brain-doctor = "brain_cli:doctor_main"
+brain-sync = "brain_cli:sync_main"
+brain-ask = "brain_cli:ask_main"
+brain-watch = "brain_cli:watch_main"
+brain-remember = "brain_cli:remember_main"
+
+[tool.setuptools]
+py-modules = [
+  "ask_brain",
+  "brain_cli",
+  "brain_common",
+  "brain_doctor",
+  "brain_init",
+  "brain_settings",
+  "brain_tui",
+  "memorize",
+  "sync_brain",
+  "watch_brain",
+]

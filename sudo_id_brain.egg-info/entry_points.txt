@@ -1,0 +1,10 @@
+[console_scripts]
+brain = brain_cli:main
+brain-ask = brain_cli:ask_main
+brain-doctor = brain_cli:doctor_main
+brain-init = brain_cli:init_main
+brain-remember = brain_cli:remember_main
+brain-start = brain_cli:start_main
+brain-sync = brain_cli:sync_main
+brain-tui = brain_cli:tui_main
+brain-watch = brain_cli:watch_main

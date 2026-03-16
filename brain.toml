@@ -1,0 +1,16 @@
+# Project-level Brain config
+
+[index]
+# Extra extensions to index. Defaults already include:
+# .py, .js, .ts, .tsx, .md, .txt, .json, .yaml, .yml, .sh
+include_extensions = []
+
+# Extra directory names to ignore anywhere in the tree.
+ignore_dirs = []
+
+# Extra path patterns to ignore (same syntax as .brainignore).
+ignore_patterns = []
+
+[watch]
+# Debounce delay before auto-sync runs after a file change.
+debounce_seconds = 1.5

@@ -1,0 +1,10 @@
+ask_brain
+brain_cli
+brain_common
+brain_doctor
+brain_init
+brain_settings
+brain_tui
+memorize
+sync_brain
+watch_brain
