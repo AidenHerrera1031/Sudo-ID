@@ -67,6 +67,7 @@ class BrainTUI:
         ]
         self.show_setup_steps = True
         self.onboarding_complete = False
+        self._bootstrap_existing_state()
 
     def append_log(self, line: str) -> None:
         line = str(line or "").rstrip("\n")
@@ -125,10 +126,27 @@ class BrainTUI:
     def _is_setup_action(self, key: str) -> bool:
         return key in {"recommended", "init", "doctor", "key", "sync"}
 
+    def _starter_files_present(self) -> bool:
+        return all(
+            (self.project_root / name).exists()
+            for name in (".env", ".brainignore", "brain.toml")
+        )
+
+    def _bootstrap_existing_state(self) -> None:
+        if self._starter_files_present():
+            self.states["init"].status = "done"
+        if self._has_openai_key():
+            self.states["key"].status = "done"
+        if self.last_sync_at > 0:
+            self.states["sync"].status = "done"
+        if self._starter_files_present() and self.last_sync_at > 0:
+            self.states["doctor"].status = "done"
+
     def _is_onboarding_complete(self) -> bool:
         recommended_done = self.states["recommended"].status == "done"
         manual_done = all(self.states[name].status == "done" for name in ("init", "doctor", "sync"))
-        return recommended_done or manual_done
+        inferred_done = self._starter_files_present() and self.last_sync_at > 0
+        return recommended_done or manual_done or inferred_done
 
     def _sync_menu_mode(self) -> None:
         complete = self._is_onboarding_complete()
