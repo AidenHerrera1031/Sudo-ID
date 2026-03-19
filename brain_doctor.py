@@ -7,7 +7,8 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
-from brain_common import DB_PATH, get_collection
+import brain_init
+from brain_common import DB_PATH, get_collection, probe_collection, reset_collection
 from brain_settings import load_settings
 
 
@@ -161,6 +162,14 @@ def _check_db_path() -> CheckResult:
 
 
 def _check_collection() -> CheckResult:
+    ok, detail = probe_collection()
+    if not ok:
+        return CheckResult(
+            "Collection",
+            "fail",
+            f"Collection probe failed: {detail}",
+            "Run `brain doctor --fix` or `brain sync --force-reindex` to rebuild the active collection.",
+        )
     try:
         collection = get_collection()
         count = collection.count()
@@ -186,7 +195,40 @@ def _check_index_state() -> CheckResult:
     )
 
 
-def run_doctor(json_output: bool = False) -> int:
+def apply_fixes(results: list[CheckResult]) -> list[str]:
+    actions = []
+    names = {item.name: item for item in results}
+
+    config_result = names.get("Config")
+    ignore_result = names.get(".brainignore")
+    env_result = names.get("OPENAI_API_KEY")
+    if (
+        (config_result and config_result.status == "warn")
+        or (ignore_result and ignore_result.status == "warn")
+        or (env_result and ".env is missing" in env_result.detail)
+    ):
+        brain_init.run_init(force=False)
+        actions.append("Scaffolded missing Brain project files with `brain init`.")
+
+    db_path = Path(DB_PATH).expanduser()
+    try:
+        db_path.mkdir(parents=True, exist_ok=True)
+        actions.append(f"Ensured DB directory exists: {db_path}")
+    except Exception:
+        pass
+
+    collection_result = names.get("Collection")
+    if collection_result and collection_result.status == "fail":
+        try:
+            reset_collection()
+            actions.append("Reset the active Chroma collection after a failed collection probe.")
+        except Exception:
+            pass
+
+    return actions
+
+
+def run_doctor(json_output: bool = False, fix: bool = False) -> int:
     results = []
     results.append(_check_python())
     results.append(_check_dependencies())
@@ -195,6 +237,7 @@ def run_doctor(json_output: bool = False) -> int:
     results.append(_check_db_path())
     results.append(_check_collection())
     results.append(_check_index_state())
+    fix_actions = apply_fixes(results) if fix else []
 
     fail_count = sum(1 for item in results if item.status == "fail")
     warn_count = sum(1 for item in results if item.status == "warn")
@@ -214,6 +257,7 @@ def run_doctor(json_output: bool = False) -> int:
                 }
                 for item in results
             ],
+            "fix_actions": fix_actions,
         }
         print(json.dumps(payload, indent=2))
     else:
@@ -223,6 +267,11 @@ def run_doctor(json_output: bool = False) -> int:
             print(f"[{label}] {item.name}: {item.detail}")
             if item.hint:
                 print(f"       hint: {item.hint}")
+        if fix_actions:
+            print("")
+            print("Fix Actions:")
+            for action in fix_actions:
+                print(f"- {action}")
         print("")
         print(f"Summary: {ok_count} ok, {warn_count} warnings, {fail_count} failures")
 

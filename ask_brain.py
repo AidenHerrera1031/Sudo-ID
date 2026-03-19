@@ -1,7 +1,5 @@
 import argparse
-import json
 import os
-import sys
 from collections import OrderedDict
 from pathlib import Path
 
@@ -12,17 +10,22 @@ from brain_common import get_collection
 
 DEFAULT_RESULTS = 5
 OPENAI_TIMEOUT_SECONDS = float(os.getenv("BRAIN_OPENAI_TIMEOUT", "8"))
-SUMMARY_KINDS = {"file_summary", "chat_summary", "decision_log"}
-SUMMARY_KIND_PRIORITY = {"chat_summary": 0, "decision_log": 1, "file_summary": 2}
-CHAT_FIRST = os.getenv("BRAIN_CHAT_FIRST", "1").strip().lower() not in {"0", "false", "no", "off"}
+SUMMARY_KINDS = {"project_identity", "file_summary", "chat_summary", "decision_log"}
+SUMMARY_KIND_PRIORITY = {"project_identity": 0, "decision_log": 1, "file_summary": 2, "chat_summary": 3}
+CHAT_FIRST = os.getenv("BRAIN_CHAT_FIRST", "0").strip().lower() not in {"0", "false", "no", "off"}
 DEFAULT_MODE = os.getenv("BRAIN_DEFAULT_MODE", "human").strip().lower()
 if DEFAULT_MODE not in {"human", "codex", "both"}:
     DEFAULT_MODE = "human"
-CHAT_HISTORY_FILE = Path(
-    os.getenv("BRAIN_CHAT_HISTORY_FILE", str(Path.home() / ".codex" / "history.jsonl"))
-).expanduser()
+DEFAULT_SCOPE = os.getenv("BRAIN_DEFAULT_SCOPE", "mixed").strip().lower()
+if DEFAULT_SCOPE not in {"mixed", "project", "chat"}:
+    DEFAULT_SCOPE = "mixed"
+DEFAULT_RENDER = os.getenv("BRAIN_DEFAULT_RENDER", "plain").strip().lower()
+if DEFAULT_RENDER not in {"plain", "sections"}:
+    DEFAULT_RENDER = "plain"
 
 load_dotenv()
+
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 def compact_snippet(text: str, limit: int = 150) -> str:
@@ -53,29 +56,105 @@ def compact_chat_summary_snippet(text: str, limit: int = 220) -> str:
     return compact_snippet(raw, limit=limit)
 
 
-def current_session_source() -> str:
+def confidence_label(metas) -> str:
+    kinds = {str((meta or {}).get("kind", "")).strip() for meta in metas}
+    if "project_identity" in kinds:
+        return "high"
+    if "file_summary" in kinds or "decision_log" in kinds:
+        return "medium"
+    if "chat_summary" in kinds or "chat_log" in kinds:
+        return "low"
+    return "low"
+
+
+def format_human_sections(answer: str, key_points, files, missing_context: str, confidence: str) -> str:
+    lines = ["Answer:"]
+    lines.append(f"- {answer}")
+    lines.append("Key Points:")
+    if key_points:
+        lines.extend(f"- {point}" for point in key_points[:3])
+    else:
+        lines.append("- No additional key points.")
+    lines.append("Files:")
+    if files:
+        lines.extend(f"- {path}" for path in files[:3])
+    else:
+        lines.append("- No project files were strong matches.")
+    lines.append("Missing Context:")
+    lines.append(f"- {missing_context or 'None.'}")
+    lines.append("Confidence:")
+    lines.append(f"- {confidence}")
+    return "\n".join(lines)
+
+
+def looks_like_project_overview_query(query: str) -> bool:
+    normalized = " ".join((query or "").strip().lower().split())
+    if not normalized:
+        return False
+    phrases = (
+        "what is this project about",
+        "what is this repo about",
+        "what is this repository about",
+        "what does this project do",
+        "what does this repo do",
+        "project overview",
+        "repo overview",
+        "repository overview",
+    )
+    return any(phrase in normalized for phrase in phrases)
+
+
+def project_overview_fallback() -> str:
+    readme_path = PROJECT_ROOT / "README.md"
+    description = ""
+    bullets = []
+
     try:
-        lines = CHAT_HISTORY_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()
+        lines = readme_path.read_text(encoding="utf-8", errors="ignore").splitlines()
     except OSError:
-        return ""
+        lines = []
 
-    for line in reversed(lines):
-        line = line.strip()
-        if not line:
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
             continue
+        description = stripped
+        break
+
+    in_what_it_does = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "## What it does":
+            in_what_it_does = True
+            continue
+        if in_what_it_does and stripped.startswith("## "):
+            break
+        if in_what_it_does and stripped.startswith("- "):
+            bullets.append(stripped[2:].strip())
+        if len(bullets) >= 2:
+            break
+
+    if not description:
+        pyproject_path = PROJECT_ROOT / "pyproject.toml"
         try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        session_id = str(record.get("session_id", "")).strip()
-        if session_id:
-            return f"chat:{session_id}"
-    return ""
+            for line in pyproject_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("description = "):
+                    description = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+        except OSError:
+            pass
+
+    lines_out = []
+    if description:
+        lines_out.append(description)
+    lines_out.extend(bullets[:2])
+    return "\n".join(lines_out).strip()
 
 
-def retrieve_context(query: str, n_results: int, summaries_only: bool = True):
+def retrieve_context(query: str, n_results: int, summaries_only: bool = True, scope: str = "mixed"):
     collection = get_collection()
-    query_count = n_results if not summaries_only else max(n_results * 12, n_results)
+    query_count = n_results if not summaries_only else max(n_results * 40, 80)
     results = collection.query(
         query_texts=[query],
         n_results=query_count,
@@ -89,16 +168,25 @@ def retrieve_context(query: str, n_results: int, summaries_only: bool = True):
         return docs[:n_results], metas[:n_results], dists[:n_results]
 
     summary_candidates = []
+    project_summary_candidates = []
+    chat_summary_candidates = []
     chat_log_candidates = []
+    project_other_candidates = []
     for idx, doc in enumerate(docs):
         meta = metas[idx] if idx < len(metas) else {}
         dist = dists[idx] if idx < len(dists) else None
         kind = str((meta or {}).get("kind", "")).strip()
         if kind in SUMMARY_KINDS:
             summary_candidates.append((doc, meta, dist))
+            if kind == "chat_summary":
+                chat_summary_candidates.append((doc, meta, dist))
+            else:
+                project_summary_candidates.append((doc, meta, dist))
             continue
         if kind == "chat_log":
             chat_log_candidates.append((doc, meta, dist))
+            continue
+        project_other_candidates.append((doc, meta, dist))
 
     if CHAT_FIRST:
         def sort_key(item):
@@ -117,34 +205,36 @@ def retrieve_context(query: str, n_results: int, summaries_only: bool = True):
         summary_candidates.sort(key=sort_key)
     else:
         summary_candidates.sort(key=lambda item: item[2] if isinstance(item[2], (float, int)) else float("inf"))
+        project_summary_candidates.sort(key=lambda item: item[2] if isinstance(item[2], (float, int)) else float("inf"))
+        chat_summary_candidates.sort(key=lambda item: item[2] if isinstance(item[2], (float, int)) else float("inf"))
 
     chat_log_candidates.sort(key=lambda item: item[2] if isinstance(item[2], (float, int)) else float("inf"))
+    project_other_candidates.sort(key=lambda item: item[2] if isinstance(item[2], (float, int)) else float("inf"))
 
-    active_source = current_session_source()
-    active_candidates = []
-    if summaries_only and active_source.startswith("chat:"):
-        active_session_id = active_source.split("chat:", 1)[1]
-        where = {"$and": [{"kind": "chat_summary"}, {"session_id": active_session_id}]}
-        active_result = collection.get(where=where, include=["documents", "metadatas"])
-        active_docs = active_result.get("documents", []) or []
-        active_metas = active_result.get("metadatas", []) or []
-        for idx, doc in enumerate(active_docs):
-            meta = active_metas[idx] if idx < len(active_metas) else {}
-            active_candidates.append((doc, meta, 0.0))
-
-    candidates = list(active_candidates) + list(summary_candidates)
-    if len(candidates) < n_results:
-        candidates.extend(chat_log_candidates)
-    if active_source:
-        candidates.sort(
-            key=lambda item: 0 if str((item[1] or {}).get("source", "")).strip() == active_source else 1
-        )
+    if scope == "project":
+        candidates = list(project_summary_candidates)
+        if len(candidates) < n_results:
+            candidates.extend(project_other_candidates)
+    elif scope == "chat":
+        candidates = list(chat_summary_candidates)
+        if len(candidates) < n_results:
+            candidates.extend(chat_log_candidates)
+    else:
+        candidates = list(project_summary_candidates) + list(chat_summary_candidates)
+        if len(candidates) < n_results:
+            candidates.extend(project_other_candidates)
+        if len(candidates) < n_results:
+            candidates.extend(chat_log_candidates)
 
     out_docs, out_metas, out_dists = [], [], []
     seen_keys = set()
     for doc, meta, dist in candidates:
         kind = str((meta or {}).get("kind", "")).strip()
         source = str((meta or {}).get("source", "")).strip()
+        if scope == "project" and kind in {"chat_summary", "chat_log"}:
+            continue
+        if scope == "chat" and kind not in {"chat_summary", "chat_log"}:
+            continue
         if kind == "chat_log":
             key = (
                 source,
@@ -164,7 +254,7 @@ def retrieve_context(query: str, n_results: int, summaries_only: bool = True):
     return out_docs, out_metas, out_dists
 
 
-def summarize_with_openai(query: str, docs, metas, mode: str) -> str:
+def summarize_with_openai(query: str, docs, metas, mode: str, render: str = "plain", scope: str = "mixed") -> str:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return ""
@@ -196,12 +286,18 @@ def summarize_with_openai(query: str, docs, metas, mode: str) -> str:
                 "content": (
                     f"Question: {query}\n"
                     f"Output mode: {mode}\n\n"
+                    f"Render style: {render}\n"
                     f"Retrieved context:\n{context_text}\n\n"
-                    "If mode is `human`, return only this format:\n"
-                    "Human Summary:\n"
-                    "- Direct answer in 1 line\n"
-                    "- Key points (max 4 bullets)\n"
-                    "- Missing context (only if needed)\n"
+                    f"Retrieval scope: {scope}\n"
+                    "If mode is `human` and render is `plain`, return only the answer text.\n"
+                    "No heading, no provenance, no preamble, max 5 short lines.\n"
+                    "If mode is `human` and render is `sections`, use exactly these headings:\n"
+                    "Answer:\n"
+                    "Key Points:\n"
+                    "Files:\n"
+                    "Missing Context:\n"
+                    "Confidence:\n"
+                    "Keep each section concise.\n"
                     "If mode is `codex`, return only this format:\n"
                     "Codex Context:\n"
                     "- Facts/decisions (max 6 bullets)\n"
@@ -216,7 +312,7 @@ def summarize_with_openai(query: str, docs, metas, mode: str) -> str:
     return response.choices[0].message.content or ""
 
 
-def local_synthesis(query: str, docs, metas, mode: str) -> str:
+def local_synthesis(query: str, docs, metas, mode: str, render: str = "plain", scope: str = "mixed") -> str:
     grouped = OrderedDict()
     for idx, doc in enumerate(docs):
         meta = metas[idx] if idx < len(metas) else {}
@@ -234,16 +330,60 @@ def local_synthesis(query: str, docs, metas, mode: str) -> str:
 
     max_points = 4
     items = list(grouped.items())
+    has_non_chat_context = any(
+        str(data.get("kind", "")).strip() not in {"chat_summary", "chat_log"} for _source, data in items
+    )
+    has_project_identity = any(str(data.get("kind", "")).strip() == "project_identity" for _source, data in items)
+
+    if mode == "human" and looks_like_project_overview_query(query) and not has_project_identity:
+        fallback = project_overview_fallback()
+        if fallback:
+            if render == "sections":
+                return format_human_sections(
+                    answer=fallback.splitlines()[0].strip(),
+                    key_points=[line.strip() for line in fallback.splitlines()[1:3] if line.strip()],
+                    files=["README.md", "pyproject.toml"],
+                    missing_context="Detailed architecture summaries are not indexed yet.",
+                    confidence="medium",
+                )
+            return fallback
+
+    human_snippets = []
+    seen_human_snippets = set()
+    for _source, data in items:
+        snippet = str(data.get("snippet", "")).strip()
+        if not snippet:
+            continue
+        normalized = snippet.lower()
+        if normalized in seen_human_snippets:
+            continue
+        seen_human_snippets.add(normalized)
+        human_snippets.append(snippet)
 
     human_lines = ["Human Summary:"]
-    if items:
-        human_lines.append(f"- Built from {len(items)} matching memory entries for: {query}")
-        for source, data in items[:max_points]:
-            human_lines.append(f"- {source}: {data['snippet']}")
-        if len(items) > max_points:
-            human_lines.append(f"- +{len(items) - max_points} more entries (use --raw-only for full details)")
+    if human_snippets:
+        human_lines.extend(f"- {snippet}" for snippet in human_snippets[:2])
     else:
         human_lines.append("- No matching memory yet.")
+
+    file_sources = []
+    seen_sources = set()
+    for source, data in items:
+        kind = str(data.get("kind", "")).strip()
+        if kind in {"chat_summary", "chat_log"}:
+            continue
+        if source in seen_sources:
+            continue
+        seen_sources.add(source)
+        file_sources.append(source)
+
+    missing_context = ""
+    if not items:
+        missing_context = "No matching memory yet."
+    elif scope == "project" and not file_sources:
+        missing_context = "No strong project-memory matches. Run `brain sync` to refresh project summaries."
+    elif not has_non_chat_context:
+        missing_context = "Results are chat-heavy. Use `--scope project` after a fresh sync for repo-focused answers."
 
     codex_lines = ["Codex Context:"]
     if items:
@@ -255,7 +395,25 @@ def local_synthesis(query: str, docs, metas, mode: str) -> str:
         codex_lines.append("- No matching memory yet.")
 
     if mode == "human":
-        return "\n".join(human_lines)
+        if render == "sections":
+            if human_snippets:
+                return format_human_sections(
+                    answer=human_snippets[0],
+                    key_points=human_snippets[1:3],
+                    files=file_sources,
+                    missing_context=missing_context or "None.",
+                    confidence=confidence_label(metas),
+                )
+            return format_human_sections(
+                answer="No matching memory yet.",
+                key_points=[],
+                files=[],
+                missing_context="Run `brain sync` to build project memory.",
+                confidence="low",
+            )
+        if human_snippets:
+            return "\n".join(human_snippets[:2])
+        return "No matching memory yet."
     if mode == "codex":
         return "\n".join(codex_lines)
     return "\n".join(human_lines + [""] + codex_lines)
@@ -286,6 +444,18 @@ def main():
         help="Response format for people, coding agents, or both",
     )
     parser.add_argument(
+        "--scope",
+        choices=["mixed", "project", "chat"],
+        default=DEFAULT_SCOPE,
+        help="Bias retrieval toward project summaries, chat memory, or a mix.",
+    )
+    parser.add_argument(
+        "--render",
+        choices=["plain", "sections"],
+        default=DEFAULT_RENDER,
+        help="Plain text or a compact sectioned answer renderer for human mode.",
+    )
+    parser.add_argument(
         "--include-code",
         action="store_true",
         help="Search all entries, including raw code chunks (default searches summaries only)",
@@ -298,7 +468,12 @@ def main():
     args = parser.parse_args()
 
     query = " ".join(args.query).strip()
-    docs, metas, dists = retrieve_context(query, args.top_k, summaries_only=not args.include_code)
+    docs, metas, dists = retrieve_context(
+        query,
+        args.top_k,
+        summaries_only=not args.include_code,
+        scope=args.scope,
+    )
 
     if not docs:
         if args.include_code:
@@ -312,14 +487,14 @@ def main():
         return
 
     try:
-        summary = summarize_with_openai(query, docs, metas, args.mode)
+        summary = summarize_with_openai(query, docs, metas, args.mode, render=args.render, scope=args.scope)
         if summary:
             print(summary.strip())
             return
-    except Exception as exc:
-        print(f"OpenAI summarization skipped: {exc}", file=sys.stderr)
+    except Exception:
+        pass
 
-    print(local_synthesis(query, docs, metas, args.mode))
+    print(local_synthesis(query, docs, metas, args.mode, render=args.render, scope=args.scope))
 
 
 if __name__ == "__main__":

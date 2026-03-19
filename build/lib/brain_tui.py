@@ -1,5 +1,6 @@
 import curses
 import getpass
+import json
 import os
 import queue
 import re
@@ -10,6 +11,9 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+WATCHER_SMOKE_MARKER = "glacier-lantern-4821"
+WATCHER_SMOKE_QUERY = "glacier lantern 4821"
 
 
 @dataclass
@@ -31,6 +35,13 @@ class BrainTUI:
         self.runtime = None
         self.watch_process = None
         self.watch_log_path = Path("/tmp/brain_watch_tui.log")
+        self.watch_status_path = self.project_root / ".codex_brain" / "watch_status.json"
+        self.last_sync_at = self._detect_last_sync_time()
+        self.last_question = ""
+        self.last_answer_lines = []
+        self.last_answer_sections = {}
+        self.project_summary = self._load_project_summary()
+        self.ask_scope = "mixed"
         self.states = {
             "recommended": StepState(),
             "init": StepState(),
@@ -46,7 +57,9 @@ class BrainTUI:
             ("doctor", "Run Health Checks (brain doctor)"),
             ("key", "Set OPENAI_API_KEY"),
             ("sync", "Sync Project Memory (brain sync)"),
+            ("scope", "Ask Scope"),
             ("ask", "Ask a Question (brain ask)"),
+            ("smoke_test", "Run Watcher Smoke Test"),
             ("watch", "Start Watch Mode (brain watch)"),
             ("stop_watch", "Stop Watch Mode"),
             ("toggle_setup", "Hide completed/setup steps"),
@@ -91,8 +104,7 @@ class BrainTUI:
     def _runtime_line(self) -> str:
         if not self.runtime:
             if self._is_watch_running():
-                pid = self.watch_process.pid if self.watch_process else "?"
-                return f"Watch running in background (pid {pid}) | log: {self.watch_log_path}"
+                return "Watch running in background."
             return "Ready."
 
         name = self.runtime.get("name", "command")
@@ -123,7 +135,7 @@ class BrainTUI:
         if complete and not self.onboarding_complete:
             self.onboarding_complete = True
             self.show_setup_steps = False
-            self.append_log("Onboarding complete. Switched to daily mode menu.")
+            self.logs = []
         elif not complete:
             self.onboarding_complete = False
 
@@ -132,12 +144,14 @@ class BrainTUI:
             return "Hide completed/setup steps" if self.show_setup_steps else "Show completed/setup steps"
         if key == "recommended" and self.states["recommended"].status == "fail":
             return "Run Setup Again (last run failed)"
-        if key == "watch" and self._is_watch_running():
-            return "Watch Mode Running (background)"
+        if key == "scope":
+            return f"Ask Scope: {self.ask_scope.title()}"
         return label
 
     def _should_show_action(self, key: str) -> bool:
-        if key in {"ask", "watch", "toggle_setup", "exit"}:
+        if key in {"ask", "scope", "watch", "toggle_setup", "exit"}:
+            if key == "watch":
+                return not self._is_watch_running()
             return True
         if key == "stop_watch":
             return self._is_watch_running()
@@ -167,10 +181,146 @@ class BrainTUI:
             self.selected = max(0, len(actions) - 1)
         return actions
 
+    def _detect_last_sync_time(self) -> float:
+        candidates = [
+            self.project_root / ".codex_brain" / "index_state.json",
+            self.project_root / ".codex_brain" / "chroma.sqlite3",
+        ]
+        for path in candidates:
+            try:
+                if path.exists():
+                    return path.stat().st_mtime
+            except OSError:
+                continue
+        return 0.0
+
+    def _load_project_summary(self) -> str:
+        readme_path = self.project_root / "README.md"
+        try:
+            lines = readme_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            lines = []
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                return stripped
+        return "Terminal-first local project memory assistant."
+
+    def _relative_time(self, ts: float) -> str:
+        if ts <= 0:
+            return "never"
+        delta = max(0, int(time.time() - ts))
+        if delta < 10:
+            return "just now"
+        if delta < 60:
+            return f"{delta}s ago"
+        if delta < 3600:
+            return f"{delta // 60}m ago"
+        if delta < 86400:
+            return f"{delta // 3600}h ago"
+        return f"{delta // 86400}d ago"
+
+    def _memory_status_text(self) -> str:
+        brain_dir = self.project_root / ".codex_brain"
+        if not brain_dir.exists():
+            return "not built"
+        if self.states["sync"].status == "running":
+            return "syncing now"
+        if self.last_sync_at > 0:
+            return "ready"
+        return "present"
+
+    def _load_watch_status(self) -> dict:
+        try:
+            if self.watch_status_path.exists():
+                data = json.loads(self.watch_status_path.read_text(encoding="utf-8", errors="ignore"))
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+        return {}
+
+    def _parse_answer_sections(self, lines: list[str]) -> dict[str, list[str]]:
+        sections = {}
+        current = ""
+        for raw in lines:
+            line = str(raw or "").strip()
+            if not line:
+                continue
+            if line.endswith(":") and line[:-1] in {"Answer", "Key Points", "Files", "Missing Context", "Confidence"}:
+                current = line[:-1]
+                sections.setdefault(current, [])
+                continue
+            if current:
+                sections.setdefault(current, []).append(line)
+        return sections
+
+    def _watch_dashboard_line(self) -> str:
+        status = self._load_watch_status()
+        state = str(status.get("state", "")).strip().lower()
+        finished = float(status.get("last_sync_finished_at", 0) or 0)
+        if finished > self.last_sync_at:
+            self.last_sync_at = finished
+
+        if state == "syncing":
+            return "Watch: syncing changes now"
+        if state == "debouncing":
+            return "Watch: changes detected, waiting to sync"
+        if state == "error":
+            detail = str(status.get("last_error", "")).strip() or "last sync failed"
+            return f"Watch: error | {detail}"
+        if state == "running":
+            if finished > 0:
+                ok = status.get("last_sync_ok")
+                sync_label = "ok" if ok else "failed"
+                return f"Watch: running | last sync {sync_label} {self._relative_time(finished)}"
+            return "Watch: running"
+        if self._is_watch_running():
+            return "Watch: running"
+        return "Watch: stopped"
+
+    def _dashboard_lines(self) -> list[str]:
+        content_width = max(24, self.width - 6)
+        lines = []
+
+        overview = textwrap.wrap(f"Overview: {self.project_summary}", width=content_width)
+        lines.extend(overview[:2] or ["Overview: unavailable"])
+
+        lines.append(self._watch_dashboard_line())
+        lines.append(f"Memory: {self._memory_status_text()} | ask scope {self.ask_scope}")
+        lines.append(f"Last sync: {self._relative_time(self.last_sync_at)}")
+        lines.append(f"Smoke marker: {WATCHER_SMOKE_MARKER}")
+
+        if self.last_question:
+            question = textwrap.shorten(self.last_question, width=content_width - 15, placeholder="...")
+            lines.append(f"Last question: {question}")
+        else:
+            lines.append("Last question: none yet")
+
+        answer_section = self.last_answer_sections.get("Answer", [])
+        confidence_section = self.last_answer_sections.get("Confidence", [])
+        if answer_section:
+            answer = " ".join(answer_section[:2]).strip()
+            answer = textwrap.shorten(answer, width=content_width - 13, placeholder="...")
+            lines.append(f"Last answer: {answer}")
+            if confidence_section:
+                confidence = " ".join(confidence_section[:1]).strip()
+                lines.append(f"Answer confidence: {confidence}")
+        elif self.last_answer_lines:
+            answer = " ".join(self.last_answer_lines[:2]).strip()
+            answer = textwrap.shorten(answer, width=content_width - 13, placeholder="...")
+            lines.append(f"Last answer: {answer}")
+        else:
+            lines.append("Last answer: none yet")
+
+        return lines[:8]
+
     def draw(self) -> None:
+        self._sync_menu_mode()
         self.stdscr.erase()
         self.height, self.width = self.stdscr.getmaxyx()
-        min_height = 21
+        min_height = 27 if self.onboarding_complete else 21
         min_width = 72
 
         if self.height < min_height or self.width < min_width:
@@ -179,7 +329,7 @@ class BrainTUI:
             self.stdscr.refresh()
             return
 
-        title = "Brain Setup TUI"
+        title = "Brain Daily Dashboard" if self.onboarding_complete else "Brain Setup TUI"
         subtitle = f"Project: {self.project_root}"
         help_line = "Arrows: move | Enter: run | q: quit"
         if self.runtime:
@@ -192,6 +342,15 @@ class BrainTUI:
         self.stdscr.addnstr(3, 2, runtime_line, self.width - 4)
 
         actions_top = 5
+        if self.onboarding_complete:
+            dashboard_top = 5
+            dashboard_lines = self._dashboard_lines()
+            self.stdscr.hline(dashboard_top, 1, curses.ACS_HLINE, self.width - 2)
+            self.stdscr.addnstr(dashboard_top, 3, " Dashboard ", self.width - 6, curses.A_BOLD)
+            for idx, line in enumerate(dashboard_lines):
+                self.stdscr.addnstr(dashboard_top + 1 + idx, 2, line, self.width - 4)
+            actions_top = dashboard_top + len(dashboard_lines) + 2
+
         actions = self._visible_actions()
         for idx, (key, label) in enumerate(actions):
             y = actions_top + idx
@@ -217,22 +376,25 @@ class BrainTUI:
         cli_script = Path(__file__).with_name("brain_cli.py")
         return [sys.executable, str(cli_script)] + list(args)
 
-    def _run_command(self, args, key: str) -> bool:
+    def _run_command(self, args, key: str, show_command: bool = True) -> bool:
         self.states[key].status = "running"
         self.states[key].detail = ""
         self.runtime = {
             "name": " ".join(args),
+            "key": key,
             "started_at": time.time(),
             "spinner_index": 0,
             "progress_current": 0,
             "progress_total": 0,
             "detail": "",
+            "captured_lines": [],
         }
         self.draw()
 
         cmd = self._brain_cmd(args)
-        self.append_log(f"$ {' '.join(args)}")
-        self.draw()
+        if show_command:
+            self.append_log(f"$ {' '.join(args)}")
+            self.draw()
 
         process = subprocess.Popen(
             cmd,
@@ -284,7 +446,14 @@ class BrainTUI:
         ok = return_code == 0
         self.states[key].status = "done" if ok else "fail"
         self.states[key].detail = f"exit code {return_code}"
-        self.append_log(f"-> {'ok' if ok else 'failed'} ({return_code})")
+        if key == "sync" and ok:
+            self.last_sync_at = time.time()
+        if key == "ask" and ok:
+            captured = [str(line).strip() for line in self.runtime.get("captured_lines", []) if str(line).strip()]
+            self.last_answer_lines = captured[:3]
+            self.last_answer_sections = self._parse_answer_sections(captured)
+        if not ok:
+            self.append_log(f"Command failed ({return_code}).")
         self.runtime = None
         self.draw()
         return ok
@@ -300,13 +469,16 @@ class BrainTUI:
         ok = return_code == 0
         self.states["watch"].status = "done" if ok else "fail"
         self.states["watch"].detail = f"exit code {return_code}"
-        self.append_log(f"Background watch exited ({return_code}).")
+        if not ok:
+            self.append_log(f"Background watch exited ({return_code}).")
         return False
 
     def _handle_runtime_output(self, raw_line: str) -> None:
         line = str(raw_line or "").rstrip("\n")
         if not line:
             return
+
+        runtime_key = str((self.runtime or {}).get("key", "")).strip()
 
         match = re.match(r"^Sync progress:\s+(\d+)\s*/\s*(\d+)\s+\((\d+)%\)\s*(.*)$", line)
         if match and self.runtime:
@@ -319,7 +491,34 @@ class BrainTUI:
 
         if line.startswith("[sync] ") and self.runtime:
             self.runtime["detail"] = line.replace("[sync] ", "", 1).strip()
+            return
 
+        if runtime_key == "sync":
+            if line.startswith("Project memory updated:"):
+                self.append_log("Sync complete.")
+                return
+            if line.startswith("Chroma write issue detected."):
+                self.append_log(line)
+                return
+            return
+
+        if runtime_key == "ask":
+            if line.startswith("OpenAI summarization skipped:"):
+                return
+            if line == "Human Summary:":
+                return
+            if line.startswith("- Built from "):
+                return
+            if line.startswith("Codex Context:"):
+                return
+            if line.startswith("- Additional entries not shown:"):
+                return
+            if line.startswith("- "):
+                line = line[2:]
+            line = re.sub(r"^chat:[0-9a-f-]+:\s*", "", line)
+
+        if runtime_key == "ask" and self.runtime is not None:
+            self.runtime.setdefault("captured_lines", []).append(line)
         self.append_log(line)
 
     def _suspend_for_input(self):
@@ -405,8 +604,6 @@ class BrainTUI:
         if self.states["recommended"].status == "done":
             if self._confirm("Recommended setup complete. Start watch mode now?", default=True):
                 self.start_watch()
-            else:
-                self.append_log("Skipped watch mode start.")
 
     def set_key(self):
         if self._has_openai_key() and not self._confirm("OPENAI_API_KEY already exists. Overwrite?", default=False):
@@ -430,17 +627,34 @@ class BrainTUI:
             self.append_log("No question entered.")
             self.states["ask"].status = "fail"
             return
-        ok = self._run_command(["ask", question], key="ask")
+        self.last_question = question
+        self.append_log(f"Question: {question}")
+        ok = self._run_command(
+            ["ask", "--scope", self.ask_scope, "--render", "sections", question],
+            key="ask",
+            show_command=False,
+        )
+        self.states["ask"].status = "done" if ok else "fail"
+
+    def run_smoke_test(self):
+        self.last_question = f"watcher smoke marker lookup ({WATCHER_SMOKE_QUERY})"
+        self.append_log(f"Smoke test query: {WATCHER_SMOKE_QUERY}")
+        self.append_log(f"Expected marker: {WATCHER_SMOKE_MARKER}")
+        self.append_log("Expected source: WATCHER_SMOKE_TEST.md")
+        self.last_answer_sections = {}
+        ok = self._run_command(
+            ["ask", "--scope", "project", "--include-code", "--raw-only", WATCHER_SMOKE_QUERY],
+            key="ask",
+            show_command=False,
+        )
         self.states["ask"].status = "done" if ok else "fail"
 
     def start_watch(self):
         if self._is_watch_running():
-            pid = self.watch_process.pid if self.watch_process else "?"
-            self.append_log(f"Watch mode is already running in background (pid {pid}).")
+            self.append_log("Watch mode is already running.")
             return
 
         cmd = self._brain_cmd(["watch"])
-        self.append_log("Starting watch mode in background.")
         log_handle = None
         try:
             log_handle = self.watch_log_path.open("a", encoding="utf-8")
@@ -461,9 +675,6 @@ class BrainTUI:
         self.watch_process = process
         self.states["watch"].status = "running"
         self.states["watch"].detail = f"pid {process.pid}"
-        self.append_log(
-            f"Watch mode started (pid {process.pid}). You can ask questions now. Logs: {self.watch_log_path}"
-        )
 
     def stop_watch(self):
         process = self.watch_process
@@ -490,6 +701,14 @@ class BrainTUI:
         self.watch_process = None
         self.states["watch"].status = "done"
         self.states["watch"].detail = "stopped by user"
+        try:
+            self.watch_status_path.parent.mkdir(parents=True, exist_ok=True)
+            self.watch_status_path.write_text(
+                json.dumps({"state": "stopped", "updated_at": int(time.time())}, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
         self.append_log("Watch mode stopped.")
 
     def on_enter(self) -> bool:
@@ -519,8 +738,19 @@ class BrainTUI:
         if key == "sync":
             self._run_command(["sync"], key="sync")
             return True
+        if key == "scope":
+            order = ["mixed", "project", "chat"]
+            try:
+                idx = order.index(self.ask_scope)
+            except ValueError:
+                idx = 0
+            self.ask_scope = order[(idx + 1) % len(order)]
+            return True
         if key == "ask":
             self.ask_question()
+            return True
+        if key == "smoke_test":
+            self.run_smoke_test()
             return True
         if key == "watch":
             self.start_watch()

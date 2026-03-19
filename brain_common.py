@@ -2,6 +2,7 @@ import hashlib
 import math
 import os
 import re
+import subprocess
 import sys
 
 import chromadb
@@ -11,6 +12,7 @@ DB_PATH = os.getenv("BRAIN_DB_PATH", "./.codex_brain")
 COLLECTION_BASE_NAME = os.getenv("BRAIN_COLLECTION_BASE_NAME", "project_context")
 DEFAULT_ST_MODEL = "all-MiniLM-L6-v2"
 DEFAULT_EMBED_PROVIDER = "local"
+COLLECTION_PROBE_SKIP_ENV = "BRAIN_SKIP_COLLECTION_PROBE"
 
 
 class LocalHashEmbeddingFunction:
@@ -90,3 +92,35 @@ def reset_collection():
     except Exception:
         pass
     return db_client.get_or_create_collection(name=collection_name, embedding_function=embedding_fn)
+
+
+def probe_collection(timeout_seconds: float = 20.0):
+    if os.getenv(COLLECTION_PROBE_SKIP_ENV, "").strip():
+        return True, "skipped"
+
+    probe_code = (
+        "from brain_common import get_collection\n"
+        "col = get_collection()\n"
+        "out = col.get(limit=1, include=['metadatas'])\n"
+        "print(len(out.get('ids', [])))\n"
+    )
+    env = dict(os.environ)
+    env[COLLECTION_PROBE_SKIP_ENV] = "1"
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", probe_code],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "timed out"
+
+    if result.returncode == 0:
+        return True, (result.stdout or "").strip()
+
+    stderr = (result.stderr or "").strip()
+    stdout = (result.stdout or "").strip()
+    detail = stderr or stdout or f"probe failed with exit code {result.returncode}"
+    return False, detail

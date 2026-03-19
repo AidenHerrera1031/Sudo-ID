@@ -12,7 +12,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from brain_common import DB_PATH, get_collection, reset_collection
+from brain_common import DB_PATH, get_collection, probe_collection, reset_collection
 from brain_settings import load_settings, should_ignore_dir, should_include_file
 
 try:
@@ -47,6 +47,7 @@ except (TypeError, ValueError):
     CHAT_SUMMARY_CONCURRENCY = 3
 SESSION_ID_RE = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
 CHAT_SESSION_HASH_KEY_PREFIX = "__chat_session_hash__::"
+PROJECT_IDENTITY_HASH_KEY = "__project_identity_hash__"
 
 try:
     SYNC_THROTTLE_MS = max(0, int(os.getenv("BRAIN_SYNC_THROTTLE_MS", "0")))
@@ -432,6 +433,113 @@ def local_chat_summary(session_id: str, session_entries) -> str:
     )
 
 
+def _read_text_lines(path: Path) -> list[str]:
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return []
+
+
+def build_project_identity_docs(project_root: Path) -> list[tuple[str, str, str]]:
+    readme_lines = _read_text_lines(project_root / "README.md")
+    pyproject_lines = _read_text_lines(project_root / "pyproject.toml")
+
+    description = ""
+    bullets = []
+    commands = []
+
+    for line in readme_lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            description = stripped
+            break
+
+    in_what_it_does = False
+    for line in readme_lines:
+        stripped = line.strip()
+        if stripped == "## What it does":
+            in_what_it_does = True
+            continue
+        if in_what_it_does and stripped.startswith("## "):
+            break
+        if in_what_it_does and stripped.startswith("- "):
+            bullets.append(stripped[2:].strip())
+        if len(bullets) >= 4:
+            break
+
+    if not description:
+        for line in pyproject_lines:
+            stripped = line.strip()
+            if stripped.startswith("description = "):
+                description = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                break
+
+    package_json = project_root / "package.json"
+    try:
+        package_data = json.loads(package_json.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        package_data = {}
+    for name, cmd in (package_data.get("scripts") or {}).items():
+        if name in {"setup", "start", "sync", "watch", "ask", "doctor", "tui"}:
+            commands.append(f"{name}: {cmd}")
+
+    overview_lines = []
+    if description:
+        overview_lines.append(f"Project Overview: {description}")
+    if bullets:
+        overview_lines.append("Core Capabilities:")
+        overview_lines.extend(f"- {item}" for item in bullets[:4])
+    if not overview_lines:
+        overview_lines.append("Project Overview: Local project memory assistant.")
+
+    commands_lines = ["Primary Commands:"]
+    if commands:
+        commands_lines.extend(f"- {line}" for line in commands[:6])
+    else:
+        commands_lines.extend(
+            [
+                "- brain start: guided onboarding",
+                "- brain tui: full-screen terminal UI",
+                "- brain sync: refresh project memory",
+                "- brain ask: query indexed context",
+                "- brain watch: auto-sync on file changes",
+            ]
+        )
+
+    return [
+        ("project::identity::overview", "project:overview", "\n".join(overview_lines).strip()),
+        ("project::identity::commands", "project:commands", "\n".join(commands_lines).strip()),
+    ]
+
+
+def upsert_project_identity(collection, project_root: Path, current_state: dict, previous_state: dict) -> int:
+    identity_docs = build_project_identity_docs(project_root)
+    identity_hash = digest_text("\n\n".join(doc for _id, _source, doc in identity_docs))
+    current_state[PROJECT_IDENTITY_HASH_KEY] = identity_hash
+    if previous_state.get(PROJECT_IDENTITY_HASH_KEY) == identity_hash:
+        return 0
+
+    stale = collection.get(where={"kind": "project_identity"}, include=[])
+    if stale.get("ids"):
+        collection.delete(ids=stale["ids"])
+
+    now = int(time.time())
+    collection.upsert(
+        ids=[doc_id for doc_id, _source, _doc in identity_docs],
+        documents=[doc for _doc_id, _source, doc in identity_docs],
+        metadatas=[
+            {
+                "source": source,
+                "kind": "project_identity",
+                "identity_type": source.split(":", 1)[1] if ":" in source else source,
+                "indexed_at": now,
+            }
+            for _doc_id, source, _doc in identity_docs
+        ],
+    )
+    return len(identity_docs)
+
+
 def openai_file_summary(source: str, text: str, changed: bool, previous_summary: str) -> str:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key or OpenAI is None:
@@ -765,6 +873,7 @@ def index_project(force_reindex: bool = False) -> None:
     indexed_files = 0
     indexed_chunks = 0
     summary_updates = 0
+    identity_updates = 0
     chat_chunks = 0
     chat_summary_refreshes = 0
     emit_status(f"Stage 1/4: scanning complete, {len(file_paths)} candidate files.")
@@ -843,6 +952,9 @@ def index_project(force_reindex: bool = False) -> None:
     )
 
     emit_status("Stage 4/4: finalizing state and cleanup...")
+    identity_updates = upsert_project_identity(collection, project_root, current_state, previous_state)
+    if identity_updates:
+        emit_status(f"Project identity summaries refreshed: {identity_updates}")
     removed_sources = sorted(
         source
         for source in (set(previous_state.keys()) - set(current_state.keys()))
@@ -856,13 +968,22 @@ def index_project(force_reindex: bool = False) -> None:
     save_state(current_state)
     print(
         f"Project memory updated: {indexed_files} files, {indexed_chunks} chunks, "
-        f"{summary_updates} summary refreshes, {chat_chunks} chat chunks, "
+        f"{summary_updates} summary refreshes, {identity_updates} identity summaries, {chat_chunks} chat chunks, "
         f"{chat_summary_refreshes} chat summary refreshes, {len(removed_sources)} removals."
     )
     emit_status("Stage 4/4: done.")
 
 
 def run_sync(force_reindex: bool = False) -> None:
+    ok, detail = probe_collection()
+    if not ok:
+        print(
+            f"Collection probe failed ({detail}). Rebuilding collection and retrying full sync...",
+            file=sys.stderr,
+        )
+        reset_collection()
+        save_state({})
+        force_reindex = True
     try:
         index_project(force_reindex=force_reindex)
     except Exception as exc:

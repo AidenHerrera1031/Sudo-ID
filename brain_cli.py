@@ -1,6 +1,8 @@
 import argparse
 import getpass
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -91,8 +93,13 @@ def doctor_main(argv=None):
         action="store_true",
         help="Emit machine-readable JSON output.",
     )
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="Apply safe local fixes for missing starter files and storage paths.",
+    )
     args = parser.parse_args(argv)
-    raise SystemExit(brain_doctor.run_doctor(json_output=args.json))
+    raise SystemExit(brain_doctor.run_doctor(json_output=args.json, fix=args.fix))
 
 
 def tui_main(argv=None):
@@ -102,6 +109,80 @@ def tui_main(argv=None):
     )
     parser.parse_args(argv)
     raise SystemExit(brain_tui.run_tui())
+
+
+def install_shell_main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="brain install-shell",
+        description="Print or append shell PATH setup so the `brain` command is available.",
+    )
+    parser.add_argument(
+        "--shell",
+        choices=["bash", "zsh"],
+        default="bash",
+        help="Shell profile to target.",
+    )
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help="Append the snippet to the shell rc file instead of printing it.",
+    )
+    args = parser.parse_args(argv)
+
+    resolved_brain = shutil.which("brain")
+    brain_path = Path(resolved_brain).resolve() if resolved_brain else Path(sys.argv[0]).resolve()
+    install_dir = brain_path.parent
+    snippet = f'export PATH="{install_dir}:$PATH"'
+    rc_path = Path.home() / (".zshrc" if args.shell == "zsh" else ".bashrc")
+
+    if not args.write:
+        print(snippet)
+        print(f"# Add the line above to {rc_path}")
+        return
+
+    existing = ""
+    try:
+        existing = rc_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        existing = ""
+    if snippet not in existing:
+        new_content = existing.rstrip("\n")
+        if new_content:
+            new_content += "\n"
+        new_content += snippet + "\n"
+        rc_path.write_text(new_content, encoding="utf-8")
+        print(f"Updated {rc_path}")
+    else:
+        print(f"{rc_path} already contains the Brain PATH export.")
+
+
+def upgrade_main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="brain upgrade",
+        description="Reinstall the latest Brain package from a local path or package source.",
+    )
+    parser.add_argument(
+        "--source",
+        default=".",
+        help="Local path or pipx-installable source. Defaults to the current directory.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the command without executing it.",
+    )
+    args = parser.parse_args(argv)
+
+    source = args.source
+    source_path = Path(source).expanduser()
+    install_target = str(source_path.resolve()) if source_path.exists() else source
+    cmd = ["pipx", "install", "--force", install_target]
+
+    if args.dry_run:
+        print(" ".join(cmd))
+        return
+
+    raise SystemExit(subprocess.run(cmd, check=False).returncode)
 
 
 def _prompt_yes_no(message: str, default: bool = True) -> bool:
@@ -259,6 +340,8 @@ def _print_usage():
     print("  tui       Full-screen terminal UI for setup and operations")
     print("  init      Scaffold .env, .brainignore, and brain.toml")
     print("  doctor    Run environment/config/storage diagnostics")
+    print("  upgrade   Reinstall/update the Brain CLI with pipx")
+    print("  install-shell Print or append shell PATH setup for `brain`")
     print("  sync      Sync project + chat context into local memory")
     print("  ask       Query memory context")
     print("  watch     Auto-sync on file changes")
@@ -270,6 +353,9 @@ def _print_usage():
     print("  brain tui")
     print("  brain init")
     print("  brain doctor")
+    print("  brain doctor --fix")
+    print("  brain upgrade --dry-run")
+    print("  brain install-shell")
     print("  brain sync")
     print("  brain ask \"what changed today?\"")
     print("  brain watch")
@@ -295,6 +381,12 @@ def main():
         return
     if command == "doctor":
         doctor_main(argv)
+        return
+    if command == "upgrade":
+        upgrade_main(argv)
+        return
+    if command == "install-shell":
+        install_shell_main(argv)
         return
     if command == "sync":
         sync_main(argv)

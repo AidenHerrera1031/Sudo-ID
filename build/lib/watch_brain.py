@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -14,6 +15,47 @@ try:
 except Exception:
     FileSystemEventHandler = object
     Observer = None
+
+
+def watch_status_path(project_root: Path) -> Path:
+    return project_root / ".codex_brain" / "watch_status.json"
+
+
+def write_watch_status(project_root: Path, **updates) -> None:
+    path = watch_status_path(project_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {}
+    try:
+        if path.exists():
+            payload = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        payload = {}
+    payload.update(updates)
+    payload["updated_at"] = int(time.time())
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def run_sync_with_status(sync_cmd, project_root: Path, reason: str) -> bool:
+    now = int(time.time())
+    write_watch_status(
+        project_root,
+        state="syncing",
+        last_change_reason=reason,
+        last_sync_started_at=now,
+    )
+    result = subprocess.run(sync_cmd, check=False)
+    finished = int(time.time())
+    ok = result.returncode == 0
+    write_watch_status(
+        project_root,
+        state="running" if ok else "error",
+        last_sync_started_at=now,
+        last_sync_finished_at=finished,
+        last_sync_ok=ok,
+        last_sync_returncode=result.returncode,
+        last_error="" if ok else f"sync exited with code {result.returncode}",
+    )
+    return ok
 
 
 class BrainSyncHandler(FileSystemEventHandler):
@@ -53,6 +95,12 @@ class BrainSyncHandler(FileSystemEventHandler):
             if self.running:
                 return
             self.running = True
+        write_watch_status(
+            self.project_root,
+            state="debouncing",
+            last_change_at=int(time.time()),
+            last_change_reason=str(path),
+        )
 
         threading.Thread(target=self._debounced_run, daemon=True).start()
 
@@ -65,8 +113,11 @@ class BrainSyncHandler(FileSystemEventHandler):
                 break
 
         print("Change detected. Running sync_brain.py ...")
-        subprocess.run(self.sync_cmd, check=False)
-        print("Sync complete. Watching for changes...")
+        ok = run_sync_with_status(self.sync_cmd, self.project_root, "filesystem change")
+        if ok:
+            print("Sync complete. Watching for changes...")
+        else:
+            print("Sync failed. Watching for changes...")
 
         with self.lock:
             self.running = False
@@ -90,6 +141,13 @@ def run_polling_watcher(watch_path: Path, project_root: Path, settings, sync_cmd
     print("watchdog is not installed; using polling mode.")
     print(f"Watching {watch_path} for source/docs changes...")
     print("Press Ctrl+C to stop.")
+    write_watch_status(
+        project_root,
+        state="running",
+        backend="polling",
+        watch_path=str(watch_path),
+        last_error="",
+    )
 
     last_snapshot = {}
     for path in iter_files(watch_path, project_root=project_root, settings=settings):
@@ -119,13 +177,17 @@ def run_polling_watcher(watch_path: Path, project_root: Path, settings, sync_cmd
             now = time.time()
             if changed and now >= next_allowed_sync:
                 print("Change detected. Running sync_brain.py ...")
-                subprocess.run(sync_cmd, check=False)
-                print("Sync complete. Watching for changes...")
+                ok = run_sync_with_status(sync_cmd, project_root, "filesystem change")
+                if ok:
+                    print("Sync complete. Watching for changes...")
+                else:
+                    print("Sync failed. Watching for changes...")
                 next_allowed_sync = now + debounce_seconds
 
             last_snapshot = current
             time.sleep(max(0.5, debounce_seconds))
     except KeyboardInterrupt:
+        write_watch_status(project_root, state="stopped")
         return
 
 
@@ -168,6 +230,13 @@ def main():
     observer = Observer()
     observer.schedule(handler, str(watch_path), recursive=True)
     observer.start()
+    write_watch_status(
+        project_root,
+        state="running",
+        backend="watchdog",
+        watch_path=str(watch_path),
+        last_error="",
+    )
 
     print(f"Watching {watch_path} for source/docs changes...")
     print("Press Ctrl+C to stop.")
@@ -177,6 +246,7 @@ def main():
             time.sleep(1)
     except KeyboardInterrupt:
         observer.stop()
+        write_watch_status(project_root, state="stopped")
     observer.join()
 
 
