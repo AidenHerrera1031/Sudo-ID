@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sudo-id-brain"
-version = "0.2.0"
+version = "0.2.1"
 description = "Terminal-first project memory sidecar for code and Codex session context."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -36,6 +36,7 @@ py-modules = [
   "brain_init",
   "brain_settings",
   "brain_tui",
+  "brain_version",
   "memorize",
   "sync_brain",
   "watch_brain",

@@ -12,6 +12,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from brain_version import get_brain_version
+
 WATCHER_SMOKE_MARKER = "glacier-lantern-4821"
 WATCHER_SMOKE_QUERY = "glacier lantern 4821"
 
@@ -33,6 +35,7 @@ class BrainTUI:
         self.width = 80
         self.height = 24
         self.project_root = Path(".").resolve()
+        self.brain_version, self.version_source = get_brain_version()
         self.spinner_frames = ["|", "/", "-", "\\"]
         self.runtime = None
         self.watch_process = None
@@ -467,7 +470,8 @@ class BrainTUI:
             self.stdscr.refresh()
             return
 
-        title = "Brain Dashboard" if self.onboarding_complete else "Brain Setup"
+        base_title = "Brain Dashboard" if self.onboarding_complete else "Brain Setup"
+        title = f"{base_title} v{self.brain_version}"
         subtitle = f"Project: {self.project_root}"
         help_line = "Move: arrows/jk | Run: Enter | Quit: q"
         if self.runtime:

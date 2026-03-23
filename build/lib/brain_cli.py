@@ -12,6 +12,7 @@ import ask_brain
 import brain_doctor
 import brain_init
 import brain_tui
+import brain_version
 import memorize
 import sync_brain
 import watch_brain
@@ -109,6 +110,29 @@ def tui_main(argv=None):
     )
     parser.parse_args(argv)
     raise SystemExit(brain_tui.run_tui())
+
+
+def version_main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="brain version",
+        description="Show the running Brain version and install/source details.",
+    )
+    parser.add_argument(
+        "--short",
+        action="store_true",
+        help="Print only the version number.",
+    )
+    args = parser.parse_args(argv)
+
+    info = brain_version.get_version_info(executable=shutil.which("brain") or sys.argv[0])
+    if args.short:
+        print(info["version"])
+        return
+
+    print(f"Brain version: {info['version']}")
+    print(f"Version source: {info['source']}")
+    print(f"Executable: {info['executable'] or 'unknown'}")
+    print(f"Module path: {info['module_path']}")
 
 
 def install_shell_main(argv=None):
@@ -336,6 +360,7 @@ def _print_usage():
     print("Usage: brain <command> [args]")
     print("")
     print("Commands:")
+    print("  version   Show the running Brain version and install details")
     print("  start     Guided setup wizard (recommended first run)")
     print("  tui       Full-screen terminal UI for setup and operations")
     print("  init      Scaffold .env, .brainignore, and brain.toml")
@@ -349,6 +374,8 @@ def _print_usage():
     print("")
     print("Examples:")
     print("  brain start")
+    print("  brain version")
+    print("  brain --version")
     print("  brain start --tui")
     print("  brain tui")
     print("  brain init")
@@ -363,6 +390,10 @@ def _print_usage():
 
 
 def main():
+    if len(sys.argv) >= 2 and sys.argv[1] in {"-V", "--version"}:
+        version_main([])
+        return
+
     if len(sys.argv) < 2 or sys.argv[1] in {"-h", "--help", "help"}:
         _print_usage()
         return
@@ -370,6 +401,9 @@ def main():
     command = sys.argv[1].strip().lower()
     argv = sys.argv[2:]
 
+    if command == "version":
+        version_main(argv)
+        return
     if command == "start":
         start_main(argv)
         return
