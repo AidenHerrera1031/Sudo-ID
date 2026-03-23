@@ -27,6 +27,8 @@ class BrainTUI:
         self.stdscr = stdscr
         self.selected = 0
         self.logs = []
+        self.output_override_lines = []
+        self.output_scroll = 0
         self.max_logs = 500
         self.width = 80
         self.height = 24
@@ -52,17 +54,17 @@ class BrainTUI:
             "watch": StepState(),
         }
         self.action_defs = [
-            ("recommended", "Run Recommended Setup (init -> doctor -> sync)"),
-            ("init", "Initialize Files (brain init)"),
-            ("doctor", "Run Health Checks (brain doctor)"),
+            ("recommended", "Run Recommended Setup"),
+            ("init", "Initialize Files"),
+            ("doctor", "Run Health Checks"),
             ("key", "Set OPENAI_API_KEY"),
-            ("sync", "Sync Project Memory (brain sync)"),
+            ("sync", "Sync Memory"),
             ("scope", "Ask Scope"),
-            ("ask", "Ask a Question (brain ask)"),
-            ("smoke_test", "Run Watcher Smoke Test"),
-            ("watch", "Start Watch Mode (brain watch)"),
+            ("ask", "Ask a Question"),
+            ("smoke_test", "Watcher Smoke Test"),
+            ("watch", "Start Watch Mode"),
             ("stop_watch", "Stop Watch Mode"),
-            ("toggle_setup", "Hide completed/setup steps"),
+            ("toggle_setup", "Hide setup steps"),
             ("exit", "Exit"),
         ]
         self.show_setup_steps = True
@@ -78,6 +80,125 @@ class BrainTUI:
             self.logs.append(part)
         if len(self.logs) > self.max_logs:
             self.logs = self.logs[-self.max_logs :]
+
+    def _clear_output(self) -> None:
+        self.logs = []
+        self.output_override_lines = []
+        self.output_scroll = 0
+
+    def _set_output_lines(self, lines: list[str]) -> None:
+        self.logs = []
+        self.output_override_lines = []
+        self.output_scroll = 0
+        for raw in lines:
+            line = str(raw or "").rstrip("\n")
+            if not line:
+                self.output_override_lines.append("")
+                continue
+            wrapped = textwrap.wrap(line, width=max(20, self.width - 4)) or [line]
+            self.output_override_lines.extend(wrapped)
+
+    def _output_lines(self) -> list[str]:
+        if self.runtime:
+            return self.logs
+        return self.output_override_lines or self.logs
+
+    def _max_output_scroll(self, log_height: int) -> int:
+        lines = self._output_lines()
+        return max(0, len(lines) - max(1, log_height))
+
+    def _clamp_output_scroll(self, log_height: int) -> None:
+        self.output_scroll = max(0, min(self.output_scroll, self._max_output_scroll(log_height)))
+
+    def _visible_output_lines(self, log_height: int) -> list[str]:
+        lines = self._output_lines()
+        height = max(1, log_height)
+        if self.runtime or not self.output_override_lines:
+            return lines[-height:]
+        self._clamp_output_scroll(height)
+        start = self.output_scroll
+        end = start + height
+        return lines[start:end]
+
+    def _output_status_label(self, log_height: int) -> str:
+        lines = self._output_lines()
+        if not lines:
+            return " Output "
+
+        height = max(1, log_height)
+        if self.runtime or not self.output_override_lines:
+            total = len(lines)
+            start = max(1, total - height + 1)
+            end = total
+            return f" Output {start}-{end}/{total} "
+
+        self._clamp_output_scroll(height)
+        total = len(lines)
+        start = self.output_scroll + 1
+        end = min(total, self.output_scroll + height)
+        return f" Output {start}-{end}/{total} "
+
+    def _output_log_height(self, actions: list[tuple[str, str]]) -> int:
+        actions_top = 5
+        if self.onboarding_complete:
+            actions_top = 5 + len(self._dashboard_lines()) + 2
+        logs_top = actions_top + len(actions) + 1
+        return max(1, self.height - logs_top - 2)
+
+    def _show_answer_output(self) -> None:
+        lines = []
+        section_order = ["Answer", "Key Points", "Files", "Missing Context", "Confidence"]
+        list_sections = {"Key Points", "Files"}
+
+        if self.last_answer_sections:
+            for heading in section_order:
+                values = [str(value or "").strip() for value in self.last_answer_sections.get(heading, []) if str(value or "").strip()]
+                if not values:
+                    continue
+                lines.append(f"{heading}:")
+                for value in values:
+                    cleaned = value[2:].strip() if value.startswith("- ") else value
+                    if heading in list_sections:
+                        lines.append(f"- {cleaned}")
+                    else:
+                        lines.append(cleaned)
+                lines.append("")
+        elif self.last_answer_lines:
+            lines.extend(self.last_answer_lines)
+
+        if lines and not lines[-1].strip():
+            lines.pop()
+        if not lines:
+            lines = ["No answer yet."]
+
+        self._set_output_lines(lines)
+
+    def _show_watch_output(self) -> None:
+        self._set_output_lines(
+            [
+                "Watch mode started.",
+                "Changes will sync in the background.",
+                "Use 'Stop Watch Mode' to stop it.",
+            ]
+        )
+
+    def _wrap_label_value(self, label: str, value: str, width: int) -> list[str]:
+        prefix = f"{label}: "
+        cleaned = str(value or "").strip() or "none"
+        wrapper = textwrap.TextWrapper(
+            width=max(20, width),
+            initial_indent=prefix,
+            subsequent_indent=" " * len(prefix),
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+        return wrapper.wrap(cleaned) or [prefix.rstrip()]
+
+    def _clean_section_value(self, value: str) -> str:
+        cleaned = str(value or "").strip()
+        if cleaned.startswith("- "):
+            return cleaned[2:].strip()
+        return cleaned
 
     def _status_label(self, key: str) -> str:
         state = self.states.get(key)
@@ -153,13 +274,13 @@ class BrainTUI:
         if complete and not self.onboarding_complete:
             self.onboarding_complete = True
             self.show_setup_steps = False
-            self.logs = []
+            self._clear_output()
         elif not complete:
             self.onboarding_complete = False
 
     def _action_label(self, key: str, label: str) -> str:
         if key == "toggle_setup":
-            return "Hide completed/setup steps" if self.show_setup_steps else "Show completed/setup steps"
+            return "Hide setup steps" if self.show_setup_steps else "Show setup steps"
         if key == "recommended" and self.states["recommended"].status == "fail":
             return "Run Setup Again (last run failed)"
         if key == "scope":
@@ -302,43 +423,42 @@ class BrainTUI:
         content_width = max(24, self.width - 6)
         lines = []
 
-        overview = textwrap.wrap(f"Overview: {self.project_summary}", width=content_width)
-        lines.extend(overview[:2] or ["Overview: unavailable"])
+        lines.extend(self._wrap_label_value("Overview", self.project_summary, content_width))
 
-        lines.append(self._watch_dashboard_line())
-        lines.append(f"Memory: {self._memory_status_text()} | ask scope {self.ask_scope}")
-        lines.append(f"Last sync: {self._relative_time(self.last_sync_at)}")
-        lines.append(f"Smoke marker: {WATCHER_SMOKE_MARKER}")
+        watch_text = self._watch_dashboard_line().replace("Watch: ", "", 1)
+        lines.append(f"Watch {watch_text} | Memory {self._memory_status_text()}")
+        lines.append(
+            f"Scope {self.ask_scope.title()} | Sync {self._relative_time(self.last_sync_at)} | Smoke {WATCHER_SMOKE_MARKER}"
+        )
 
         if self.last_question:
-            question = textwrap.shorten(self.last_question, width=content_width - 15, placeholder="...")
-            lines.append(f"Last question: {question}")
+            lines.extend(self._wrap_label_value("Q", self.last_question, content_width))
         else:
-            lines.append("Last question: none yet")
+            lines.append("Q: none yet")
 
         answer_section = self.last_answer_sections.get("Answer", [])
         confidence_section = self.last_answer_sections.get("Confidence", [])
         if answer_section:
-            answer = " ".join(answer_section[:2]).strip()
-            answer = textwrap.shorten(answer, width=content_width - 13, placeholder="...")
-            lines.append(f"Last answer: {answer}")
+            answer = " ".join(self._clean_section_value(item) for item in answer_section if str(item or "").strip()).strip()
+            lines.extend(self._wrap_label_value("A", answer, content_width))
             if confidence_section:
-                confidence = " ".join(confidence_section[:1]).strip()
-                lines.append(f"Answer confidence: {confidence}")
+                confidence = " ".join(
+                    self._clean_section_value(item) for item in confidence_section[:1] if str(item or "").strip()
+                ).strip()
+                lines.append(f"Confidence: {confidence}")
         elif self.last_answer_lines:
-            answer = " ".join(self.last_answer_lines[:2]).strip()
-            answer = textwrap.shorten(answer, width=content_width - 13, placeholder="...")
-            lines.append(f"Last answer: {answer}")
+            answer = " ".join(self.last_answer_lines).strip()
+            lines.extend(self._wrap_label_value("A", answer, content_width))
         else:
-            lines.append("Last answer: none yet")
+            lines.append("A: none yet")
 
-        return lines[:8]
+        return lines
 
     def draw(self) -> None:
         self._sync_menu_mode()
         self.stdscr.erase()
         self.height, self.width = self.stdscr.getmaxyx()
-        min_height = 27 if self.onboarding_complete else 21
+        min_height = 24 if self.onboarding_complete else 20
         min_width = 72
 
         if self.height < min_height or self.width < min_width:
@@ -347,11 +467,13 @@ class BrainTUI:
             self.stdscr.refresh()
             return
 
-        title = "Brain Daily Dashboard" if self.onboarding_complete else "Brain Setup TUI"
+        title = "Brain Dashboard" if self.onboarding_complete else "Brain Setup"
         subtitle = f"Project: {self.project_root}"
-        help_line = "Arrows: move | Enter: run | q: quit"
+        help_line = "Move: arrows/jk | Run: Enter | Quit: q"
         if self.runtime:
-            help_line = "Running command | x: cancel | q: quit after command returns"
+            help_line = "Running command | Cancel: x | Quit: q after return"
+        elif self.output_override_lines:
+            help_line = "Move: arrows/jk | Run: Enter | Scroll: PgUp/PgDn Home/End | Quit: q"
         runtime_line = self._runtime_line()
 
         self.stdscr.addnstr(0, 2, title, self.width - 4, curses.A_BOLD)
@@ -381,10 +503,10 @@ class BrainTUI:
 
         logs_top = actions_top + len(actions) + 1
         self.stdscr.hline(logs_top, 1, curses.ACS_HLINE, self.width - 2)
-        self.stdscr.addnstr(logs_top, 3, " Output ", self.width - 6, curses.A_BOLD)
+        log_height = max(1, self.height - logs_top - 2)
+        self.stdscr.addnstr(logs_top, 3, self._output_status_label(log_height), self.width - 6, curses.A_BOLD)
 
-        log_height = self.height - logs_top - 2
-        visible = self.logs[-max(1, log_height) :]
+        visible = self._visible_output_lines(log_height)
         for i, line in enumerate(visible):
             self.stdscr.addnstr(logs_top + 1 + i, 2, line, self.width - 4)
 
@@ -397,6 +519,7 @@ class BrainTUI:
     def _run_command(self, args, key: str, show_command: bool = True) -> bool:
         self.states[key].status = "running"
         self.states[key].detail = ""
+        self.output_override_lines = []
         self.runtime = {
             "name": " ".join(args),
             "key": key,
@@ -466,10 +589,12 @@ class BrainTUI:
         self.states[key].detail = f"exit code {return_code}"
         if key == "sync" and ok:
             self.last_sync_at = time.time()
-        if key == "ask" and ok:
+        if key == "ask":
             captured = [str(line).strip() for line in self.runtime.get("captured_lines", []) if str(line).strip()]
-            self.last_answer_lines = captured[:3]
-            self.last_answer_sections = self._parse_answer_sections(captured)
+            if captured:
+                self.last_answer_lines = captured
+                self.last_answer_sections = self._parse_answer_sections(captured)
+                self._show_answer_output()
         if not ok:
             self.append_log(f"Command failed ({return_code}).")
         self.runtime = None
@@ -646,7 +771,9 @@ class BrainTUI:
             self.states["ask"].status = "fail"
             return
         self.last_question = question
-        self.append_log(f"Question: {question}")
+        self.last_answer_lines = []
+        self.last_answer_sections = {}
+        self._clear_output()
         ok = self._run_command(
             ["ask", "--scope", self.ask_scope, "--render", "sections", question],
             key="ask",
@@ -656,10 +783,15 @@ class BrainTUI:
 
     def run_smoke_test(self):
         self.last_question = f"watcher smoke marker lookup ({WATCHER_SMOKE_QUERY})"
-        self.append_log(f"Smoke test query: {WATCHER_SMOKE_QUERY}")
-        self.append_log(f"Expected marker: {WATCHER_SMOKE_MARKER}")
-        self.append_log("Expected source: WATCHER_SMOKE_TEST.md")
+        self.last_answer_lines = []
         self.last_answer_sections = {}
+        self._set_output_lines(
+            [
+                f"Smoke test query: {WATCHER_SMOKE_QUERY}",
+                f"Expected marker: {WATCHER_SMOKE_MARKER}",
+                "Expected source: WATCHER_SMOKE_TEST.md",
+            ]
+        )
         ok = self._run_command(
             ["ask", "--scope", "project", "--include-code", "--raw-only", WATCHER_SMOKE_QUERY],
             key="ask",
@@ -693,6 +825,7 @@ class BrainTUI:
         self.watch_process = process
         self.states["watch"].status = "running"
         self.states["watch"].detail = f"pid {process.pid}"
+        self._show_watch_output()
 
     def stop_watch(self):
         process = self.watch_process
@@ -801,6 +934,21 @@ class BrainTUI:
                 continue
             if ch in {curses.KEY_DOWN, ord("j")}:
                 self.selected = (self.selected + 1) % len(actions)
+                continue
+            if ch == curses.KEY_PPAGE and self.output_override_lines:
+                log_height = self._output_log_height(actions)
+                self.output_scroll = max(0, self.output_scroll - max(1, log_height - 1))
+                continue
+            if ch == curses.KEY_NPAGE and self.output_override_lines:
+                log_height = self._output_log_height(actions)
+                self.output_scroll = min(self._max_output_scroll(log_height), self.output_scroll + max(1, log_height - 1))
+                continue
+            if ch == curses.KEY_HOME and self.output_override_lines:
+                self.output_scroll = 0
+                continue
+            if ch == curses.KEY_END and self.output_override_lines:
+                log_height = self._output_log_height(actions)
+                self.output_scroll = self._max_output_scroll(log_height)
                 continue
             if ch in {10, 13, curses.KEY_ENTER}:
                 keep_running = self.on_enter()

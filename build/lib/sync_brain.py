@@ -8,6 +8,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -403,15 +404,129 @@ def clear_chat_records(collection):
             collection.delete(ids=old["ids"])
 
 
-def local_file_summary(source: str, text: str, changed: bool) -> str:
+def _reconstruct_text_from_chunks(existing_docs, existing_metas) -> str:
+    chunks = []
+    for doc_idx, meta in enumerate(existing_metas or []):
+        meta = meta or {}
+        if meta.get("kind") != "code_or_docs":
+            continue
+        try:
+            chunk_index = int(meta.get("chunk_index", 0) or 0)
+        except (TypeError, ValueError):
+            chunk_index = 0
+        doc = existing_docs[doc_idx] if doc_idx < len(existing_docs) else ""
+        chunks.append((chunk_index, doc or ""))
+
+    if not chunks:
+        return ""
+
+    chunks.sort(key=lambda item: item[0])
+    rebuilt = chunks[0][1]
+    for _, chunk in chunks[1:]:
+        rebuilt += chunk[OVERLAP_CHARS:] if len(chunk) > OVERLAP_CHARS else chunk
+    return rebuilt
+
+
+def _find_change_anchor(lines: list[str], line_index: int) -> str:
+    assignment_re = re.compile(r"^([A-Z][A-Z0-9_]*)\s*=")
+    symbol_re = re.compile(r"^(?:def|class)\s+([A-Za-z_][A-Za-z0-9_]*)")
+
+    if not lines:
+        return ""
+
+    upper_bound = min(max(line_index, 0), len(lines) - 1)
+    for idx in range(upper_bound, -1, -1):
+        stripped = lines[idx].strip()
+        if not stripped:
+            continue
+        assignment_match = assignment_re.match(stripped)
+        if assignment_match:
+            return assignment_match.group(1)
+        symbol_match = symbol_re.match(stripped)
+        if symbol_match:
+            return symbol_match.group(1)
+    return ""
+
+
+def _extract_change_tokens(lines: list[str]) -> list[str]:
+    tokens = []
+    seen = set()
+    for raw_line in lines:
+        line = str(raw_line or "").strip()
+        if not line or line in {"{", "}", "[", "]", "(", ")"}:
+            continue
+        for match in re.findall(r'["\']([^"\']{1,80})["\']', line):
+            token = match.strip()
+            if token and token not in seen:
+                seen.add(token)
+                tokens.append(token)
+        cleaned = line.rstrip(",")
+        if cleaned.startswith(".") and " " not in cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            tokens.append(cleaned)
+    return tokens
+
+
+def summarize_notable_changes(previous_text: str, text: str) -> list[str]:
+    if not previous_text.strip() or previous_text == text:
+        return []
+
+    previous_lines = previous_text.splitlines()
+    current_lines = text.splitlines()
+    matcher = SequenceMatcher(a=previous_lines, b=current_lines)
+    changes = []
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+
+        added_lines = current_lines[j1:j2]
+        removed_lines = previous_lines[i1:i2]
+        anchor = _find_change_anchor(current_lines, j1) or _find_change_anchor(previous_lines, i1)
+        added_tokens = _extract_change_tokens(added_lines)
+        removed_tokens = _extract_change_tokens(removed_lines)
+
+        if added_tokens:
+            token_text = ", ".join(f'"{token}"' for token in added_tokens[:3])
+            changes.append(f"added {token_text}" + (f" in {anchor}" if anchor else ""))
+
+        if removed_tokens:
+            token_text = ", ".join(f'"{token}"' for token in removed_tokens[:3])
+            changes.append(f"removed {token_text}" + (f" from {anchor}" if anchor else ""))
+
+        if not added_tokens and not removed_tokens and anchor:
+            changes.append(f"updated {anchor}")
+
+        if len(changes) >= 3:
+            break
+
+    deduped = []
+    seen = set()
+    for change in changes:
+        normalized = change.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(change)
+    return deduped[:3]
+
+
+def local_file_summary(source: str, text: str, changed: bool, previous_text: str = "") -> str:
     lines = text.splitlines()
     symbols = extract_symbols(text)[:8]
-    headline = "Updated file." if changed else "No new code changes."
+    notable_changes = summarize_notable_changes(previous_text, text) if changed else []
+    if notable_changes:
+        first_change = notable_changes[0]
+        headline = first_change[:1].upper() + first_change[1:] + "."
+    else:
+        headline = "Updated file." if changed else "No new code changes."
     symbol_line = ", ".join(symbols) if symbols else "None detected"
+    change_line = f"Notable Changes: {'; '.join(notable_changes)}.\n" if notable_changes else ""
     return (
         f"File: {source}\n"
         f"Summary: {headline}\n"
         f"Stats: {len(lines)} lines, {len(text)} chars.\n"
+        f"{change_line}"
         f"Key Symbols: {symbol_line}\n"
         "Use this note for high-level context; pull code chunks only when needed."
     )
@@ -612,7 +727,13 @@ def openai_chat_summary(session_id: str, session_entries, previous_summary: str)
     return (response.choices[0].message.content or "").strip()
 
 
-def make_file_summary(source: str, text: str, changed: bool, previous_summary: str) -> str:
+def make_file_summary(
+    source: str,
+    text: str,
+    changed: bool,
+    previous_summary: str,
+    previous_text: str = "",
+) -> str:
     if not changed and previous_summary:
         return previous_summary
     try:
@@ -621,7 +742,7 @@ def make_file_summary(source: str, text: str, changed: bool, previous_summary: s
             return summary
     except Exception:
         pass
-    return local_file_summary(source, text, changed)
+    return local_file_summary(source, text, changed, previous_text=previous_text)
 
 
 def make_chat_summary(session_id: str, session_entries, previous_summary: str) -> str:
@@ -899,7 +1020,9 @@ def index_project(force_reindex: bool = False) -> None:
         existing = collection.get(where={"source": source}, include=["documents", "metadatas"])
         previous_summary = ""
         existing_docs = existing.get("documents", []) or []
-        for doc_idx, meta in enumerate(existing.get("metadatas", []) or []):
+        existing_metas = existing.get("metadatas", []) or []
+        previous_text = _reconstruct_text_from_chunks(existing_docs, existing_metas)
+        for doc_idx, meta in enumerate(existing_metas):
             meta = meta or {}
             if meta.get("kind") == "file_summary":
                 doc = existing_docs[doc_idx] if doc_idx < len(existing_docs) else ""
@@ -923,7 +1046,13 @@ def index_project(force_reindex: bool = False) -> None:
         ]
         collection.upsert(ids=chunk_ids, documents=chunks, metadatas=chunk_meta)
 
-        summary_text = make_file_summary(source, text, changed, previous_summary)
+        summary_text = make_file_summary(
+            source,
+            text,
+            changed,
+            previous_summary,
+            previous_text=previous_text,
+        )
         summary_meta = {
             "source": source,
             "kind": "file_summary",

@@ -87,6 +87,44 @@ def format_human_sections(answer: str, key_points, files, missing_context: str, 
     return "\n".join(lines)
 
 
+def format_query_failure(error: Exception, mode: str, render: str) -> str:
+    message = " ".join(str(error or "").strip().split()) or "Unknown query error."
+    if "Error finding id" in message:
+        message = "Local memory index is inconsistent."
+    recovery = "Run `brain sync --force-reindex` and try again."
+
+    if mode == "human":
+        if render == "sections":
+            return format_human_sections(
+                answer="Memory query failed.",
+                key_points=[message, recovery],
+                files=[],
+                missing_context="The local Chroma index could not answer this query cleanly.",
+                confidence="low",
+            )
+        return f"Memory query failed.\n{message}\n{recovery}"
+    if mode == "codex":
+        return "\n".join(
+            [
+                "Codex Context:",
+                f"- Query failed: {message}",
+                f"- Recovery: {recovery}",
+            ]
+        )
+    return "\n".join(
+        [
+            "Human Summary:",
+            "- Memory query failed.",
+            f"- {message}",
+            f"- {recovery}",
+            "",
+            "Codex Context:",
+            f"- Query failed: {message}",
+            f"- Recovery: {recovery}",
+        ]
+    )
+
+
 def looks_like_project_overview_query(query: str) -> bool:
     normalized = " ".join((query or "").strip().lower().split())
     if not normalized:
@@ -468,12 +506,16 @@ def main():
     args = parser.parse_args()
 
     query = " ".join(args.query).strip()
-    docs, metas, dists = retrieve_context(
-        query,
-        args.top_k,
-        summaries_only=not args.include_code,
-        scope=args.scope,
-    )
+    try:
+        docs, metas, dists = retrieve_context(
+            query,
+            args.top_k,
+            summaries_only=not args.include_code,
+            scope=args.scope,
+        )
+    except Exception as exc:
+        print(format_query_failure(exc, args.mode, args.render))
+        raise SystemExit(1)
 
     if not docs:
         if args.include_code:
