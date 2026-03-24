@@ -33,6 +33,14 @@ def _find_local_pyproject(start: Path) -> Path | None:
     return None
 
 
+def find_local_source_root(start: Path | None = None) -> Path | None:
+    module_path = (start or Path(__file__)).resolve()
+    pyproject_path = _find_local_pyproject(module_path)
+    if not pyproject_path:
+        return None
+    return pyproject_path.parent.resolve()
+
+
 def get_brain_version() -> tuple[str, str]:
     module_path = Path(__file__).resolve()
     pyproject_path = _find_local_pyproject(module_path)
@@ -55,10 +63,12 @@ def get_version_info(executable: str = "") -> dict[str, str]:
             executable_path = str(Path(executable).resolve())
         except OSError:
             executable_path = str(executable)
+    source_root = find_local_source_root()
     return {
         "package_name": PACKAGE_NAME,
         "version": version,
         "source": source,
         "module_path": str(Path(__file__).resolve()),
         "executable": executable_path,
+        "source_root": str(source_root) if source_root else "",
     }

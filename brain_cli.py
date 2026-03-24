@@ -131,6 +131,8 @@ def version_main(argv=None):
 
     print(f"Brain version: {info['version']}")
     print(f"Version source: {info['source']}")
+    if info.get("source_root"):
+        print(f"Source repo: {info['source_root']}")
     print(f"Executable: {info['executable'] or 'unknown'}")
     print(f"Module path: {info['module_path']}")
 
@@ -183,12 +185,17 @@ def install_shell_main(argv=None):
 def upgrade_main(argv=None):
     parser = argparse.ArgumentParser(
         prog="brain upgrade",
-        description="Reinstall the latest Brain package from a local path or package source.",
+        description="Install or update Brain from a local repo path or pipx-installable source.",
     )
     parser.add_argument(
         "--source",
-        default=".",
-        help="Local path or pipx-installable source. Defaults to the current directory.",
+        default="",
+        help="Local path or pipx-installable source. If omitted, reuse the detected Brain source repo.",
+    )
+    parser.add_argument(
+        "--editable",
+        action="store_true",
+        help="Install from a local repo in editable mode so `brain` uses the live source checkout.",
     )
     parser.add_argument(
         "--dry-run",
@@ -197,10 +204,29 @@ def upgrade_main(argv=None):
     )
     args = parser.parse_args(argv)
 
-    source = args.source
+    source = (args.source or "").strip()
+    if not source:
+        source_root = brain_version.find_local_source_root()
+        if not source_root:
+            print(
+                "Could not detect a local Brain source repo from the current install.",
+                file=sys.stderr,
+            )
+            print(
+                "Pass --source /path/to/Sudo-ID or another pipx-installable package reference.",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        source = str(source_root)
+
     source_path = Path(source).expanduser()
     install_target = str(source_path.resolve()) if source_path.exists() else source
     cmd = ["pipx", "install", "--force", install_target]
+    if args.editable:
+        if not source_path.exists():
+            print("--editable requires a local source path.", file=sys.stderr)
+            raise SystemExit(2)
+        cmd.insert(2, "--editable")
 
     if args.dry_run:
         print(" ".join(cmd))
@@ -382,6 +408,7 @@ def _print_usage():
     print("  brain doctor")
     print("  brain doctor --fix")
     print("  brain upgrade --dry-run")
+    print("  brain upgrade --source /workspaces/Sudo-ID --editable")
     print("  brain install-shell")
     print("  brain sync")
     print("  brain ask \"what changed today?\"")

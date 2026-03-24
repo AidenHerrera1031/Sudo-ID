@@ -32,6 +32,13 @@ cd /path/to/repo
 pipx install .
 ```
 
+For local development where other repos should use the latest code from this checkout:
+
+```bash
+cd /workspaces/Sudo-ID
+brain upgrade --source /workspaces/Sudo-ID --editable
+```
+
 ## Use in any project
 
 ```bash
@@ -43,6 +50,8 @@ brain ask "What does this project do?"
 brain watch
 brain remember --text "Decision: ..."
 ```
+
+Run `brain version` to confirm the install points at this source tree.
 
 Also available:
 - `brain-sync`

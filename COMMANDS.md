@@ -9,6 +9,13 @@ cd /path/to/sudo-id-repo
 pipx install .
 ```
 
+For a local checkout that should stay live across other repos:
+
+```bash
+cd /workspaces/Sudo-ID
+brain upgrade --source /workspaces/Sudo-ID --editable
+```
+
 Then in any project:
 
 ```bash
@@ -22,6 +29,8 @@ brain remember --text "Decision: ..."
 brain init
 brain doctor
 ```
+
+Use `brain version` to verify the active source. If linked to this checkout, it prints `Source repo: /workspaces/Sudo-ID`.
 
 Equivalent standalone commands are also available:
 - `brain-sync`

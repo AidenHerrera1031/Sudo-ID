@@ -33,12 +33,21 @@ cd /path/to/repo
 pipx install .
 ```
 
+For cross-repo local development, use an editable install from this checkout instead of a copied snapshot:
+
+```bash
+cd /workspaces/Sudo-ID
+brain upgrade --source /workspaces/Sudo-ID --editable
+```
+
 Then use in any project directory:
 
 ```bash
 cd /path/to/any-project
 brain start
 ```
+
+Run `brain version` to confirm which code is active. An editable local install shows `Source repo: /workspaces/Sudo-ID`.
 
 `brain start` is the guided first-run wizard. It walks you through init, health checks, sync, optional question, and optional watcher startup.
 For full-screen terminal UI, run `brain tui` (or `brain start --tui`).

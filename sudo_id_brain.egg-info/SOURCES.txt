@@ -6,6 +6,7 @@ brain_doctor.py
 brain_init.py
 brain_settings.py
 brain_tui.py
+brain_version.py
 memorize.py
 pyproject.toml
 sync_brain.py
