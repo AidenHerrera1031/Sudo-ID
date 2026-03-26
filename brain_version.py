@@ -2,7 +2,7 @@ from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 
 PACKAGE_NAME = "sudo-id-brain"
-FALLBACK_VERSION = "0.2.2"
+FALLBACK_VERSION = "0.2.3"
 
 
 def _read_pyproject_version(pyproject_path: Path) -> str:

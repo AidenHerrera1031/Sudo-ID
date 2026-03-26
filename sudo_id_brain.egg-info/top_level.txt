@@ -6,6 +6,7 @@ brain_init
 brain_settings
 brain_tui
 brain_version
+brain_workflows
 memorize
 sync_brain
 watch_brain

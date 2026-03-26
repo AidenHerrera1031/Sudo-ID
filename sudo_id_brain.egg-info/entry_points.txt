@@ -1,10 +1,16 @@
 [console_scripts]
 brain = brain_cli:main
 brain-ask = brain_cli:ask_main
+brain-decision = brain_cli:decision_main
 brain-doctor = brain_cli:doctor_main
+brain-guide = brain_cli:guide_main
 brain-init = brain_cli:init_main
+brain-map = brain_cli:map_main
+brain-refactor = brain_cli:refactor_main
+brain-release = brain_cli:release_main
 brain-remember = brain_cli:remember_main
 brain-start = brain_cli:start_main
+brain-summarize = brain_cli:summarize_main
 brain-sync = brain_cli:sync_main
 brain-tui = brain_cli:tui_main
 brain-watch = brain_cli:watch_main
