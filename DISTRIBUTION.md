@@ -8,6 +8,12 @@ This repo now supports an installable CLI app for cross-project use:
 - `brain ask`
 - `brain watch`
 - `brain remember`
+- `brain guide`
+- `brain map`
+- `brain refactor`
+- `brain summarize`
+- `brain release`
+- `brain decision`
 - `brain start`
 - `brain tui`
 - `brain init`
@@ -49,6 +55,10 @@ brain sync
 brain ask "What does this project do?"
 brain watch
 brain remember --text "Decision: ..."
+brain guide
+brain map "watcher status"
+brain summarize
+brain release
 ```
 
 Run `brain version` to confirm the install points at this source tree.
@@ -58,6 +68,12 @@ Also available:
 - `brain-ask`
 - `brain-watch`
 - `brain-remember`
+- `brain-guide`
+- `brain-map`
+- `brain-refactor`
+- `brain-summarize`
+- `brain-release`
+- `brain-decision`
 - `brain-start`
 - `brain-tui`
 - `brain-init`
@@ -79,6 +95,7 @@ Environment variables:
 
 - `BRAIN_DB_PATH` (default: `./.codex_brain`)
 - `BRAIN_COLLECTION_BASE_NAME` (default: `project_context`)
+- `BRAIN_CONFIG_FILE` (optional path to a non-default `brain.toml`)
 
 Example:
 

@@ -26,6 +26,14 @@ brain sync
 brain ask "What changed?"
 brain watch
 brain remember --text "Decision: ..."
+brain guide
+brain map "watcher status"
+brain refactor "sync progress output"
+brain summarize
+brain handoff
+brain pr
+brain decision --text "Keep watcher insights compact for beginners"
+brain release
 brain init
 brain doctor
 ```
@@ -37,6 +45,12 @@ Equivalent standalone commands are also available:
 - `brain-ask`
 - `brain-watch`
 - `brain-remember`
+- `brain-guide`
+- `brain-map`
+- `brain-refactor`
+- `brain-summarize`
+- `brain-release`
+- `brain-decision`
 - `brain-start`
 - `brain-tui`
 - `brain-init`
@@ -114,6 +128,38 @@ npm run remember
 ```
 Paste notes, then press `Ctrl+D` to save them.
 
+```bash
+brain guide
+```
+Print a guided repo walkthrough with core files, flows, setup files, and durable project memory.
+
+```bash
+brain map "where do I change watcher status?"
+```
+Return the most likely files, symbols, and impact areas for a task.
+
+```bash
+brain refactor "sync progress output"
+```
+Show likely impact files, regression areas, and tests/manual checks to run before a refactor.
+
+```bash
+brain summarize --mode work
+brain handoff
+brain pr
+```
+Generate current-work summaries, handoff notes, or reviewer-facing PR context from the worktree/latest diff.
+
+```bash
+brain decision --kind convention --title "Docs first" --text "Update README and COMMANDS when CLI behavior changes"
+```
+Store durable project memory that survives sessions and is queryable later.
+
+```bash
+brain release
+```
+Run pre-release checks for stale docs, env-var drift, risky diffs, and reviewer questions.
+
 ## How syncing actually works
 
 There is no time-based expiration. Sync freshness is event/change based:
@@ -141,6 +187,8 @@ Watcher ignores:
 Debounce:
 - Waits about `1.5s` after the last change before running sync.
 - You can set `watch.debounce_seconds` in `brain.toml` (or pass `--debounce`).
+- The watcher also writes a compact intelligence payload into `.codex_brain/watch_status.json`:
+  changed files, likely subsystem, possibly stale docs, and reviewer questions.
 
 ## `.brainignore` and `brain.toml`
 
@@ -148,6 +196,7 @@ Debounce:
 
 - `.brainignore`: path patterns to skip (`*.log`, `generated/`, `docs/archive/**`, etc.)
 - `brain.toml`: project settings such as `index.include_extensions`, `index.ignore_dirs`, `index.ignore_patterns`, and `watch.debounce_seconds`
+- `BRAIN_CONFIG_FILE`: optional env var to point Brain at a non-default `brain.toml` file
 
 Scaffold both with:
 

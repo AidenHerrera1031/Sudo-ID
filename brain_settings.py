@@ -199,6 +199,8 @@ def should_ignore_dir(path: Path, project_root: Path, settings: BrainSettings) -
     if not rel_path:
         return False
     parts = rel_path.split("/")
+    if any(part.endswith(".egg-info") for part in parts):
+        return True
     if any(part in settings.ignore_dirs for part in parts):
         return True
     return is_ignored_rel_path(rel_path, is_dir=True, patterns=settings.ignore_patterns)
@@ -214,6 +216,8 @@ def should_include_file(path: Path, project_root: Path, settings: BrainSettings)
         return False
 
     parts = rel_path.split("/")
+    if any(part.endswith(".egg-info") for part in parts[:-1]):
+        return False
     if any(part in settings.ignore_dirs for part in parts[:-1]):
         return False
 

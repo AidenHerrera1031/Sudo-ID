@@ -203,7 +203,23 @@ def retrieve_context(query: str, n_results: int, summaries_only: bool = True, sc
     dists = results.get("distances", [[]])[0]
 
     if not summaries_only:
-        return docs[:n_results], metas[:n_results], dists[:n_results]
+        filtered_docs, filtered_metas, filtered_dists = [], [], []
+        for idx, doc in enumerate(docs):
+            meta = metas[idx] if idx < len(metas) else {}
+            dist = dists[idx] if idx < len(dists) else None
+            kind = str((meta or {}).get("kind", "")).strip()
+
+            if scope == "project" and kind in {"chat_summary", "chat_log"}:
+                continue
+            if scope == "chat" and kind not in {"chat_summary", "chat_log"}:
+                continue
+
+            filtered_docs.append(doc)
+            filtered_metas.append(meta)
+            filtered_dists.append(dist)
+            if len(filtered_docs) >= n_results:
+                break
+        return filtered_docs, filtered_metas, filtered_dists
 
     summary_candidates = []
     project_summary_candidates = []

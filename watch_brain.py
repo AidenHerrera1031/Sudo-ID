@@ -7,7 +7,12 @@ import threading
 import time
 from pathlib import Path
 
+MODULE_DIR = str(Path(__file__).resolve().parent)
+if MODULE_DIR not in sys.path:
+    sys.path.insert(0, MODULE_DIR)
+
 from brain_settings import load_settings, should_ignore_dir, should_include_file
+from brain_workflows import analyze_change_set
 
 try:
     from watchdog.events import FileSystemEventHandler
@@ -19,6 +24,13 @@ except Exception:
 
 def watch_status_path(project_root: Path) -> Path:
     return project_root / ".codex_brain" / "watch_status.json"
+
+
+def _to_rel_path(path: Path, project_root: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(project_root.resolve())).replace("\\", "/")
+    except Exception:
+        return str(path).replace("\\", "/")
 
 
 def write_watch_status(project_root: Path, **updates) -> None:
@@ -35,13 +47,15 @@ def write_watch_status(project_root: Path, **updates) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def run_sync_with_status(sync_cmd, project_root: Path, reason: str) -> bool:
+def run_sync_with_status(sync_cmd, project_root: Path, reason: str, changed_paths=None) -> bool:
     now = int(time.time())
+    insights = analyze_change_set(changed_paths or [], project_root=project_root)
     write_watch_status(
         project_root,
         state="syncing",
         last_change_reason=reason,
         last_sync_started_at=now,
+        **insights,
     )
     result = subprocess.run(sync_cmd, check=False)
     finished = int(time.time())
@@ -54,6 +68,7 @@ def run_sync_with_status(sync_cmd, project_root: Path, reason: str) -> bool:
         last_sync_ok=ok,
         last_sync_returncode=result.returncode,
         last_error="" if ok else f"sync exited with code {result.returncode}",
+        **insights,
     )
     return ok
 
@@ -67,6 +82,7 @@ class BrainSyncHandler(FileSystemEventHandler):
         self.last_change = 0.0
         self.running = False
         self.lock = threading.Lock()
+        self.changed_paths = set()
 
     def _should_handle(self, path: Path) -> bool:
         full_path = path if path.is_absolute() else self.project_root / path
@@ -92,14 +108,21 @@ class BrainSyncHandler(FileSystemEventHandler):
 
         with self.lock:
             self.last_change = time.time()
+            try:
+                rel_path = str(path.resolve().relative_to(self.project_root.resolve())).replace("\\", "/")
+            except Exception:
+                rel_path = str(path).replace("\\", "/")
+            self.changed_paths.add(rel_path)
             if self.running:
                 return
             self.running = True
+            changed_snapshot = sorted(self.changed_paths)
         write_watch_status(
             self.project_root,
             state="debouncing",
             last_change_at=int(time.time()),
             last_change_reason=str(path),
+            **analyze_change_set(changed_snapshot, project_root=self.project_root),
         )
 
         threading.Thread(target=self._debounced_run, daemon=True).start()
@@ -112,8 +135,12 @@ class BrainSyncHandler(FileSystemEventHandler):
             if elapsed >= self.debounce_seconds:
                 break
 
+        with self.lock:
+            changed_paths = sorted(self.changed_paths)
+            self.changed_paths.clear()
+
         print("Change detected. Running sync_brain.py ...")
-        ok = run_sync_with_status(self.sync_cmd, self.project_root, "filesystem change")
+        ok = run_sync_with_status(self.sync_cmd, self.project_root, "filesystem change", changed_paths=changed_paths)
         if ok:
             print("Sync complete. Watching for changes...")
         else:
@@ -161,6 +188,7 @@ def run_polling_watcher(watch_path: Path, project_root: Path, settings, sync_cmd
         while True:
             changed = False
             current = {}
+            changed_paths = []
             for path in iter_files(watch_path, project_root=project_root, settings=settings):
                 try:
                     mtime = path.stat().st_mtime_ns
@@ -170,14 +198,25 @@ def run_polling_watcher(watch_path: Path, project_root: Path, settings, sync_cmd
                 current[key] = mtime
                 if key not in last_snapshot or last_snapshot[key] != mtime:
                     changed = True
+                    changed_paths.append(_to_rel_path(path, project_root))
 
             if set(last_snapshot) != set(current):
                 changed = True
+                removed = set(last_snapshot) - set(current)
+                changed_paths.extend(
+                    _to_rel_path(Path(path), project_root)
+                    for path in removed
+                )
 
             now = time.time()
             if changed and now >= next_allowed_sync:
                 print("Change detected. Running sync_brain.py ...")
-                ok = run_sync_with_status(sync_cmd, project_root, "filesystem change")
+                ok = run_sync_with_status(
+                    sync_cmd,
+                    project_root,
+                    "filesystem change",
+                    changed_paths=sorted({path for path in changed_paths if path}),
+                )
                 if ok:
                     print("Sync complete. Watching for changes...")
                 else:

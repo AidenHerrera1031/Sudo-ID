@@ -8,6 +8,7 @@ Terminal-first project memory sidecar for local code + Codex session context.
 - Ingests Codex chat history (sessions-first, history fallback)
 - Stores concise summaries for fast retrieval and reduced prompt load
 - Supports quick context queries, note capture, and auto-sync on file changes
+- Adds lightweight repo intelligence for onboarding, task mapping, safe refactors, work summaries, durable decisions, and release checks
 
 ## Requirements
 
@@ -61,6 +62,7 @@ This repo includes a local "brain" backed by ChromaDB:
 - `ask_brain.py`: retrieves summary context only by default (high context efficiency), prioritizing chat/decision summaries before file summaries
 - `memorize.py`: stores a distilled session note (from stdin)
 - `watch_brain.py`: watches files and auto-runs sync on changes
+- `brain_workflows.py`: workflow automation, onboarding, mapping, release checks, and durable project memory helpers
 
 ### Fast start (headless, terminal-only)
 
@@ -157,6 +159,7 @@ What `.brainignore` is for:
 - It is a project-level ignore file for Brain indexing/watching.
 - Add patterns you do not want in memory, such as `generated/`, `*.log`, or `docs/archive/**`.
 - It is applied by both `brain sync` and `brain watch`.
+- Set `BRAIN_CONFIG_FILE` if you want Brain to load a non-default `brain.toml` path.
 
 One-command onboarding options:
 
@@ -174,6 +177,19 @@ npm run ask -- "What is the main goal of Sudo-ID?"
 brain ask "What is the main goal of Sudo-ID?"
 ```
 
+Workflow helpers:
+
+```bash
+brain guide
+brain map "watcher status"
+brain refactor "sync progress output"
+brain summarize
+brain handoff
+brain pr
+brain decision --kind rule --title "Docs first" --text "Update README and COMMANDS when CLI behavior changes"
+brain release
+```
+
 Optional flags:
 
 ```bash
@@ -188,6 +204,7 @@ Default output mode is now `human` for cleaner readability.
 To disable chat-first summary ordering and use pure similarity ordering, set `BRAIN_CHAT_FIRST=0`.
 To force history-only chat ingestion, set `BRAIN_CHAT_SOURCE=history`.
 To force sessions-based ingestion, set `BRAIN_CHAT_SOURCE=sessions` (tune `BRAIN_CHAT_MAX_SESSION_FILES` and `BRAIN_CHAT_MAX_SESSION_ENTRIES` if needed).
+To override the default config file location, set `BRAIN_CONFIG_FILE=/path/to/brain.toml`.
 
 ### 5. Save session memory notes
 
@@ -211,6 +228,7 @@ brain watch
 
 Every detected save/edit triggers `sync_brain.py`, which updates code chunks and refreshes per-file summaries.
 Default debounce is configurable via `brain.toml` (`watch.debounce_seconds`) or `brain watch --debounce`.
+Watcher status now also records a compact change summary, likely affected subsystem, potentially stale docs, and reviewer questions in `.codex_brain/watch_status.json`.
 
 Background:
 

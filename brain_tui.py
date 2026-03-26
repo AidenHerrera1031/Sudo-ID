@@ -54,6 +54,7 @@ class BrainTUI:
             "key": StepState(),
             "sync": StepState(),
             "ask": StepState(),
+            "workflow": StepState(),
             "watch": StepState(),
         }
         self.action_defs = [
@@ -64,6 +65,10 @@ class BrainTUI:
             ("sync", "Sync Memory"),
             ("scope", "Ask Scope"),
             ("ask", "Ask a Question"),
+            ("guide", "Repo Walkthrough"),
+            ("map", "Find Code For Task"),
+            ("changes", "Summarize Current Work"),
+            ("release", "Release Readiness"),
             ("smoke_test", "Watcher Smoke Test"),
             ("watch", "Start Watch Mode"),
             ("stop_watch", "Stop Watch Mode"),
@@ -142,11 +147,16 @@ class BrainTUI:
         return f" Output {start}-{end}/{total} "
 
     def _output_log_height(self, actions: list[tuple[str, str]]) -> int:
+        _dashboard_lines, actions_top, logs_top = self._layout_metrics(actions)
+        return max(1, self.height - logs_top - 2)
+
+    def _layout_metrics(self, actions: list[tuple[str, str]]) -> tuple[list[str], int, int]:
+        dashboard_lines = self._dashboard_lines() if self.onboarding_complete else []
         actions_top = 5
         if self.onboarding_complete:
-            actions_top = 5 + len(self._dashboard_lines()) + 2
+            actions_top = 5 + len(dashboard_lines) + 2
         logs_top = actions_top + len(actions) + 1
-        return max(1, self.height - logs_top - 2)
+        return dashboard_lines, actions_top, logs_top
 
     def _show_answer_output(self) -> None:
         lines = []
@@ -185,7 +195,7 @@ class BrainTUI:
             ]
         )
 
-    def _wrap_label_value(self, label: str, value: str, width: int) -> list[str]:
+    def _wrap_label_value(self, label: str, value: str, width: int, max_lines: int | None = None) -> list[str]:
         prefix = f"{label}: "
         cleaned = str(value or "").strip() or "none"
         wrapper = textwrap.TextWrapper(
@@ -195,7 +205,16 @@ class BrainTUI:
             break_long_words=False,
             break_on_hyphens=False,
         )
-        return wrapper.wrap(cleaned) or [prefix.rstrip()]
+        wrapped = wrapper.wrap(cleaned) or [prefix.rstrip()]
+        if max_lines is not None and max_lines > 0 and len(wrapped) > max_lines:
+            wrapped = wrapped[:max_lines]
+            tail = wrapped[-1]
+            if len(tail) >= max(4, width - 3):
+                tail = tail[: max(0, width - 4)].rstrip()
+            if not tail.endswith("..."):
+                tail = tail.rstrip(".") + "..."
+            wrapped[-1] = tail
+        return wrapped
 
     def _clean_section_value(self, value: str) -> str:
         cleaned = str(value or "").strip()
@@ -295,6 +314,8 @@ class BrainTUI:
             if key == "watch":
                 return not self._is_watch_running()
             return True
+        if key in {"guide", "map", "changes", "release"}:
+            return self.onboarding_complete
         if key == "stop_watch":
             return self._is_watch_running()
 
@@ -398,6 +419,22 @@ class BrainTUI:
                 sections.setdefault(current, []).append(line)
         return sections
 
+    def _extract_raw_result_block(self, lines: list[str], source_name: str) -> list[str]:
+        out = []
+        capturing = False
+        target = f"source={source_name}"
+        for raw in lines:
+            line = str(raw or "").rstrip("\n")
+            stripped = line.strip()
+            if stripped.startswith("[") and "source=" in stripped:
+                if capturing:
+                    break
+                if target in stripped:
+                    capturing = True
+            if capturing:
+                out.append(line)
+        return out
+
     def _watch_dashboard_line(self) -> str:
         status = self._load_watch_status()
         state = str(status.get("state", "")).strip().lower()
@@ -422,20 +459,35 @@ class BrainTUI:
             return "Watch: running"
         return "Watch: stopped"
 
+    def _watch_insight_line(self) -> str:
+        status = self._load_watch_status()
+        subsystems = [str(item).strip() for item in status.get("subsystems", []) if str(item).strip()]
+        stale_docs = [str(item).strip() for item in status.get("stale_docs", []) if str(item).strip()]
+        if not subsystems and not stale_docs:
+            return "Insights: none yet"
+
+        parts = []
+        if subsystems:
+            parts.append("areas " + ", ".join(subsystems[:3]))
+        if stale_docs:
+            parts.append("docs " + ", ".join(stale_docs[:2]))
+        return "Insights: " + " | ".join(parts)
+
     def _dashboard_lines(self) -> list[str]:
         content_width = max(24, self.width - 6)
         lines = []
 
-        lines.extend(self._wrap_label_value("Overview", self.project_summary, content_width))
+        lines.extend(self._wrap_label_value("Overview", self.project_summary, content_width, max_lines=2))
 
         watch_text = self._watch_dashboard_line().replace("Watch: ", "", 1)
         lines.append(f"Watch {watch_text} | Memory {self._memory_status_text()}")
         lines.append(
             f"Scope {self.ask_scope.title()} | Sync {self._relative_time(self.last_sync_at)} | Smoke {WATCHER_SMOKE_MARKER}"
         )
+        lines.append(self._watch_insight_line())
 
         if self.last_question:
-            lines.extend(self._wrap_label_value("Q", self.last_question, content_width))
+            lines.extend(self._wrap_label_value("Q", self.last_question, content_width, max_lines=2))
         else:
             lines.append("Q: none yet")
 
@@ -443,7 +495,7 @@ class BrainTUI:
         confidence_section = self.last_answer_sections.get("Confidence", [])
         if answer_section:
             answer = " ".join(self._clean_section_value(item) for item in answer_section if str(item or "").strip()).strip()
-            lines.extend(self._wrap_label_value("A", answer, content_width))
+            lines.extend(self._wrap_label_value("A", answer, content_width, max_lines=2))
             if confidence_section:
                 confidence = " ".join(
                     self._clean_section_value(item) for item in confidence_section[:1] if str(item or "").strip()
@@ -451,7 +503,7 @@ class BrainTUI:
                 lines.append(f"Confidence: {confidence}")
         elif self.last_answer_lines:
             answer = " ".join(self.last_answer_lines).strip()
-            lines.extend(self._wrap_label_value("A", answer, content_width))
+            lines.extend(self._wrap_label_value("A", answer, content_width, max_lines=2))
         else:
             lines.append("A: none yet")
 
@@ -461,7 +513,9 @@ class BrainTUI:
         self._sync_menu_mode()
         self.stdscr.erase()
         self.height, self.width = self.stdscr.getmaxyx()
-        min_height = 24 if self.onboarding_complete else 20
+        actions = self._visible_actions()
+        dashboard_lines, actions_top, logs_top = self._layout_metrics(actions)
+        min_height = logs_top + 3
         min_width = 72
 
         if self.height < min_height or self.width < min_width:
@@ -485,17 +539,13 @@ class BrainTUI:
         self.stdscr.addnstr(2, 2, help_line, self.width - 4)
         self.stdscr.addnstr(3, 2, runtime_line, self.width - 4)
 
-        actions_top = 5
         if self.onboarding_complete:
             dashboard_top = 5
-            dashboard_lines = self._dashboard_lines()
             self.stdscr.hline(dashboard_top, 1, curses.ACS_HLINE, self.width - 2)
             self.stdscr.addnstr(dashboard_top, 3, " Dashboard ", self.width - 6, curses.A_BOLD)
             for idx, line in enumerate(dashboard_lines):
                 self.stdscr.addnstr(dashboard_top + 1 + idx, 2, line, self.width - 4)
-            actions_top = dashboard_top + len(dashboard_lines) + 2
 
-        actions = self._visible_actions()
         for idx, (key, label) in enumerate(actions):
             y = actions_top + idx
             attr = curses.A_REVERSE if idx == self.selected else curses.A_NORMAL
@@ -505,7 +555,6 @@ class BrainTUI:
                 line = f"    {label}"
             self.stdscr.addnstr(y, 2, line, self.width - 4, attr)
 
-        logs_top = actions_top + len(actions) + 1
         self.stdscr.hline(logs_top, 1, curses.ACS_HLINE, self.width - 2)
         log_height = max(1, self.height - logs_top - 2)
         self.stdscr.addnstr(logs_top, 3, self._output_status_label(log_height), self.width - 6, curses.A_BOLD)
@@ -801,7 +850,48 @@ class BrainTUI:
             key="ask",
             show_command=False,
         )
+        if ok:
+            block = self._extract_raw_result_block(self.last_answer_lines, "WATCHER_SMOKE_TEST.md")
+            if block:
+                self._set_output_lines(
+                    [
+                        f"Smoke test query: {WATCHER_SMOKE_QUERY}",
+                        f"Expected marker: {WATCHER_SMOKE_MARKER}",
+                        "Matched source: WATCHER_SMOKE_TEST.md",
+                        "",
+                    ]
+                    + block
+                )
+            else:
+                self._set_output_lines(
+                    [
+                        f"Smoke test query: {WATCHER_SMOKE_QUERY}",
+                        f"Expected marker: {WATCHER_SMOKE_MARKER}",
+                        "WATCHER_SMOKE_TEST.md was not returned in the top raw results.",
+                    ]
+                    + self.last_answer_lines[:12]
+                )
         self.states["ask"].status = "done" if ok else "fail"
+
+    def show_guide(self):
+        self._clear_output()
+        self._run_command(["guide"], key="workflow", show_command=False)
+
+    def map_task(self):
+        question = self._ask_text("What do you want to change? ")
+        if not question:
+            self.append_log("No task entered.")
+            return
+        self._clear_output()
+        self._run_command(["map", question], key="workflow", show_command=False)
+
+    def summarize_work(self):
+        self._clear_output()
+        self._run_command(["summarize"], key="workflow", show_command=False)
+
+    def run_release_check(self):
+        self._clear_output()
+        self._run_command(["release"], key="workflow", show_command=False)
 
     def start_watch(self):
         if self._is_watch_running():
@@ -903,6 +993,18 @@ class BrainTUI:
             return True
         if key == "ask":
             self.ask_question()
+            return True
+        if key == "guide":
+            self.show_guide()
+            return True
+        if key == "map":
+            self.map_task()
+            return True
+        if key == "changes":
+            self.summarize_work()
+            return True
+        if key == "release":
+            self.run_release_check()
             return True
         if key == "smoke_test":
             self.run_smoke_test()

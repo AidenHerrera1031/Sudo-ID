@@ -8,6 +8,10 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
+MODULE_DIR = str(Path(__file__).resolve().parent)
+if MODULE_DIR not in sys.path:
+    sys.path.insert(0, MODULE_DIR)
+
 import ask_brain
 import brain_doctor
 import brain_init
@@ -16,6 +20,7 @@ import brain_version
 import memorize
 import sync_brain
 import watch_brain
+import brain_workflows
 
 
 def _invoke_main(main_fn, argv, prog):
@@ -135,6 +140,38 @@ def version_main(argv=None):
         print(f"Source repo: {info['source_root']}")
     print(f"Executable: {info['executable'] or 'unknown'}")
     print(f"Module path: {info['module_path']}")
+
+
+def guide_main(argv=None):
+    brain_workflows.guide_main(argv)
+
+
+def map_main(argv=None):
+    brain_workflows.map_main(argv)
+
+
+def refactor_main(argv=None):
+    brain_workflows.refactor_main(argv)
+
+
+def summarize_main(argv=None):
+    brain_workflows.summarize_main(argv)
+
+
+def handoff_main(argv=None):
+    brain_workflows.handoff_main(argv)
+
+
+def pr_main(argv=None):
+    brain_workflows.pr_main(argv)
+
+
+def decision_main(argv=None):
+    brain_workflows.decision_main(argv)
+
+
+def release_main(argv=None):
+    brain_workflows.release_main(argv)
 
 
 def install_shell_main(argv=None):
@@ -397,6 +434,14 @@ def _print_usage():
     print("  ask       Query memory context")
     print("  watch     Auto-sync on file changes")
     print("  remember  Save a distilled memory note")
+    print("  guide     Guided repo walkthrough for new contributors")
+    print("  map       Map a task or question to likely files/functions")
+    print("  refactor  Show impact and verification guidance before edits")
+    print("  summarize Summarize current work, handoff, or PR context")
+    print("  handoff   Prepare a compact handoff summary")
+    print("  pr        Generate reviewer-facing PR context")
+    print("  decision  Store or list durable project memory")
+    print("  release   Run pre-release readiness checks")
     print("")
     print("Examples:")
     print("  brain start")
@@ -414,6 +459,12 @@ def _print_usage():
     print("  brain ask \"what changed today?\"")
     print("  brain watch")
     print("  brain remember --text \"Decision: ...\"")
+    print("  brain guide")
+    print("  brain map \"watcher status\"")
+    print("  brain refactor \"sync progress output\"")
+    print("  brain summarize --mode handoff")
+    print("  brain decision --kind rule --title \"Docs first\" --text \"Update COMMANDS.md with CLI changes\"")
+    print("  brain release")
 
 
 def main():
@@ -460,6 +511,30 @@ def main():
         return
     if command == "remember":
         remember_main(argv)
+        return
+    if command == "guide":
+        guide_main(argv)
+        return
+    if command == "map":
+        map_main(argv)
+        return
+    if command == "refactor":
+        refactor_main(argv)
+        return
+    if command == "summarize":
+        summarize_main(argv)
+        return
+    if command == "handoff":
+        handoff_main(argv)
+        return
+    if command == "pr":
+        pr_main(argv)
+        return
+    if command == "decision":
+        decision_main(argv)
+        return
+    if command == "release":
+        release_main(argv)
         return
 
     print(f"Unknown command: {command}", file=sys.stderr)

@@ -26,6 +26,12 @@ brain-sync = "brain_cli:sync_main"
 brain-ask = "brain_cli:ask_main"
 brain-watch = "brain_cli:watch_main"
 brain-remember = "brain_cli:remember_main"
+brain-guide = "brain_cli:guide_main"
+brain-map = "brain_cli:map_main"
+brain-refactor = "brain_cli:refactor_main"
+brain-summarize = "brain_cli:summarize_main"
+brain-release = "brain_cli:release_main"
+brain-decision = "brain_cli:decision_main"
 
 [tool.setuptools]
 py-modules = [
@@ -37,6 +43,7 @@ py-modules = [
   "brain_settings",
   "brain_tui",
   "brain_version",
+  "brain_workflows",
   "memorize",
   "sync_brain",
   "watch_brain",
