@@ -17,6 +17,8 @@ python3 --version
 npm --version
 ```
 
+Version history is tracked in `CHANGELOG.md`. Every shipped update should bump the package version and add a changelog entry.
+
 ## Install As A Reusable CLI App
 
 After publishing this repo, others can install it as a command-line app.
