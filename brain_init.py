@@ -1,6 +1,7 @@
 from pathlib import Path
 
 ENV_TEMPLATE = """# Optional but recommended for better summaries
+# This file stores local secrets and should stay out of git.
 OPENAI_API_KEY=
 
 # Optional tuning
@@ -44,6 +45,30 @@ def _write_if_needed(path: Path, content: str, force: bool) -> str:
     return "updated" if existed else "created"
 
 
+def ensure_env_gitignored(root: Path) -> str:
+    gitignore_path = root / ".gitignore"
+    entry = ".env"
+    existed = gitignore_path.exists()
+
+    if existed:
+        try:
+            existing_lines = gitignore_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            existing_lines = []
+    else:
+        existing_lines = []
+
+    if any(line.strip() == entry for line in existing_lines):
+        return "skipped"
+
+    lines = list(existing_lines)
+    if lines:
+        lines.append("")
+    lines.append(entry)
+    gitignore_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return "updated" if existed else "created"
+
+
 def run_init(force: bool = False) -> int:
     root = Path(".").resolve()
     targets = [
@@ -70,6 +95,17 @@ def run_init(force: bool = False) -> int:
         else:
             created += 1
             print(f"- created {path.name}")
+
+    gitignore_action = ensure_env_gitignored(root)
+    if gitignore_action == "created":
+        created += 1
+        print("- created .gitignore (with .env ignored)")
+    elif gitignore_action == "updated":
+        updated += 1
+        print("- updated .gitignore (added .env)")
+    else:
+        skipped += 1
+        print("- skipped .gitignore (.env already ignored)")
 
     print(f"Done. {created} created, {updated} updated, {skipped} skipped.")
     if skipped and not force:

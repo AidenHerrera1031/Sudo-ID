@@ -101,7 +101,7 @@ pip install sentence-transformers
 
 ### 2. Add your API key in `.env`
 
-Recommended command (safe prompt input):
+Recommended command:
 
 ```bash
 npm run set-key
@@ -112,6 +112,8 @@ Manual equivalent:
 ```bash
 OPENAI_API_KEY=your_key_here
 ```
+
+`npm run set-key` prepares `.env` for you to edit yourself. If `.env` does not exist yet, it scaffolds the file and adds `.env` to `.gitignore`. If `.env` already exists, it leaves the file in place and prints the path so you can open it in the editor pane.
 
 `OPENAI_API_KEY` is optional, but recommended. When present, both sync and query generate stronger summaries.
 Without it, the tool falls back to local heuristic summaries so automation still works.

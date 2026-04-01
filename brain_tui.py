@@ -1,5 +1,4 @@
 import curses
-import getpass
 import json
 import os
 import queue
@@ -275,6 +274,9 @@ class BrainTUI:
             for name in (".env", ".brainignore", "brain.toml")
         )
 
+    def _env_file_present(self) -> bool:
+        return (self.project_root / ".env").exists()
+
     def _bootstrap_existing_state(self) -> None:
         if self._starter_files_present():
             self.states["init"].status = "done"
@@ -323,13 +325,14 @@ class BrainTUI:
         if state and state.status == "running":
             return True
 
+        if key == "key":
+            return not self._env_file_present()
+
         if self.show_setup_steps or not self.onboarding_complete:
             return True
 
         if key == "recommended":
             return self.states["recommended"].status != "done"
-        if key == "key":
-            return not self._has_openai_key()
         if key in {"init", "doctor", "sync"}:
             return self.states[key].status != "done"
         return True
@@ -729,13 +732,10 @@ class BrainTUI:
         except curses.error:
             pass
 
-    def _ask_text(self, prompt: str, secret: bool = False) -> str:
+    def _ask_text(self, prompt: str) -> str:
         self._suspend_for_input()
         try:
-            if secret:
-                value = getpass.getpass(prompt)
-            else:
-                value = input(prompt)
+            value = input(prompt)
             return (value or "").strip()
         finally:
             self._resume_after_input()
@@ -766,21 +766,22 @@ class BrainTUI:
             return False
         return False
 
-    def _save_openai_key(self, value: str) -> None:
-        env_path = Path(".env")
-        lines = []
-        if env_path.exists():
-            try:
-                lines = env_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-            except OSError:
-                lines = []
-        lines = [line for line in lines if not line.startswith("OPENAI_API_KEY=")]
-        lines.append(f"OPENAI_API_KEY={value}")
-        env_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+    def _open_env_for_key_setup(self) -> bool:
+        script_path = self.project_root / "scripts" / "set_openai_key.sh"
+        if not script_path.exists():
+            self.append_log(f"Missing helper script: {script_path}")
+            return False
+
+        self._suspend_for_input()
         try:
-            os.chmod(env_path, 0o600)
-        except OSError:
-            pass
+            completed = subprocess.run(["bash", str(script_path)], check=False)
+        finally:
+            self._resume_after_input()
+
+        if completed.returncode != 0:
+            self.append_log("Could not prepare .env automatically.")
+            return False
+        return True
 
     def run_recommended(self):
         self.states["recommended"].status = "running"
@@ -802,20 +803,17 @@ class BrainTUI:
                 self.start_watch()
 
     def set_key(self):
-        if self._has_openai_key() and not self._confirm("OPENAI_API_KEY already exists. Overwrite?", default=False):
-            self.append_log("Skipped OPENAI_API_KEY update.")
-            self.states["key"].status = "done"
-            return
-
-        key_value = self._ask_text("Paste OPENAI_API_KEY (blank cancels): ", secret=True)
-        if not key_value:
-            self.append_log("No key entered.")
+        if not self._open_env_for_key_setup():
             self.states["key"].status = "fail"
             return
 
-        self._save_openai_key(key_value)
-        self.append_log("OPENAI_API_KEY saved to .env")
-        self.states["key"].status = "done"
+        if self._has_openai_key():
+            self.append_log("OPENAI_API_KEY detected in .env")
+            self.states["key"].status = "done"
+            return
+
+        self.append_log("Prepared .env. Open it in the editor pane and add OPENAI_API_KEY.")
+        self.states["key"].status = "todo"
 
     def ask_question(self):
         question = self._ask_text("Question: ")

@@ -86,7 +86,7 @@ What `npm start` does:
 ```bash
 npm run set-key
 ```
-Set `OPENAI_API_KEY` in `.env`.
+Prepare `.env` so you can set `OPENAI_API_KEY` manually in the editor pane. If `.env` does not exist, this also scaffolds the file and adds `.env` to `.gitignore`.
 
 ```bash
 npm run guide

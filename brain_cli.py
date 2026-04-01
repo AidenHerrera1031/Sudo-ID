@@ -1,5 +1,4 @@
 import argparse
-import getpass
 import os
 import shutil
 import subprocess
@@ -303,22 +302,12 @@ def _has_openai_key() -> bool:
     return bool(str(values.get("OPENAI_API_KEY", "")).strip())
 
 
-def _save_openai_key(api_key: str) -> None:
-    env_path = Path(".env")
-    existing_lines = []
-    if env_path.exists():
-        try:
-            existing_lines = env_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        except OSError:
-            existing_lines = []
-
-    filtered = [line for line in existing_lines if not line.startswith("OPENAI_API_KEY=")]
-    filtered.append(f"OPENAI_API_KEY={api_key}")
-    env_path.write_text("\n".join(filtered).strip() + "\n", encoding="utf-8")
-    try:
-        os.chmod(env_path, 0o600)
-    except OSError:
-        pass
+def _open_env_for_key_setup() -> int:
+    script_path = Path(__file__).resolve().parent / "scripts" / "set_openai_key.sh"
+    if not script_path.exists():
+        print(f"Missing helper script: {script_path}", file=sys.stderr)
+        return 1
+    return subprocess.run(["bash", str(script_path)], check=False).returncode
 
 
 def start_main(argv=None):
@@ -368,13 +357,13 @@ def start_main(argv=None):
         if args.yes:
             print("Step 3/5: OPENAI_API_KEY not found. Skipping key prompt in --yes mode.")
             print("         You can set it later with: npm run set-key")
-        elif _prompt_yes_no("Step 3/5: OPENAI_API_KEY not found. Add it now?", default=True):
-            key = getpass.getpass("Paste OPENAI_API_KEY: ").strip()
-            if key:
-                _save_openai_key(key)
-                print("OPENAI_API_KEY saved to .env.")
+        elif _prompt_yes_no("Step 3/5: OPENAI_API_KEY not found. Open .env now?", default=True):
+            if _open_env_for_key_setup() != 0:
+                print("Could not prepare .env automatically. Run `npm run set-key` later.")
+            elif _has_openai_key():
+                print("OPENAI_API_KEY detected in .env.")
             else:
-                print("No key entered. Continuing without it.")
+                print("Prepared .env. Add OPENAI_API_KEY there when ready.")
         else:
             print("Skipping API key setup.")
     else:
