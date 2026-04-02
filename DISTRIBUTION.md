@@ -22,6 +22,7 @@ This repo now supports an installable CLI app for cross-project use:
 Packaging and entrypoints:
 - `pyproject.toml`
 - `brain_cli.py`
+- `.github/workflows/ci.yml`
 
 ## Install for other users
 
@@ -96,6 +97,7 @@ Environment variables:
 - `BRAIN_DB_PATH` (default: `./.codex_brain`)
 - `BRAIN_COLLECTION_BASE_NAME` (default: `project_context`)
 - `BRAIN_CONFIG_FILE` (optional path to a non-default `brain.toml`)
+- `BRAIN_CHAT_PROJECT_ONLY` (default: `1`, only ingest Codex chat sessions whose `cwd` matches the current project)
 
 Example:
 
@@ -108,3 +110,5 @@ brain sync
 
 - `brain sync` uses the same safe sync flow as `sync_brain.py`, including Chroma recovery handling.
 - If Chroma backend errors appear (`Failed to apply logs...`), rerun sync; the recovery path attempts rebuild and retry.
+- CI runs `python -m compileall -q .` and `python -m unittest discover -s tests -v` on pushes and pull requests.
+- After upgrading from older builds that indexed global chat, rerun `brain sync` in each project to clear stale cross-project chat records from that project's local DB.

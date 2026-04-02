@@ -81,6 +81,18 @@ What `npm start` does:
 - Runs one full sync immediately.
 - Starts file watcher and keeps running until you stop it (`Ctrl+C`).
 
+## Validation
+
+```bash
+npm test
+```
+Run the regression suite in `tests/`.
+
+```bash
+npm run check
+```
+Run compile smoke plus the regression suite. This is the same verification path used in CI.
+
 ## Core commands
 
 ```bash
@@ -167,6 +179,7 @@ There is no time-based expiration. Sync freshness is event/change based:
 - `npm run sync` always performs a full project scan of tracked files.
 - For project files, it updates chunks/summaries in the local DB.
 - For chat history, it computes a hash and skips chat reindex when chat content is unchanged.
+- Chat ingestion is project-scoped by default: only Codex sessions whose recorded `cwd` matches the current project are indexed.
 - If chat changed, only changed sessions regenerate summaries; unchanged sessions are reused.
 - It removes records for files that were deleted from the repo.
 - Final state is stored in `.codex_brain/index_state.json`.
@@ -228,6 +241,11 @@ Fastest per-file mode (default).
 BRAIN_CHAT_SUMMARY_CONCURRENCY=4 npm run sync
 ```
 Increase chat summary parallelism (faster, but higher API load).
+
+```bash
+BRAIN_CHAT_PROJECT_ONLY=0 npm run sync
+```
+Opt back into global cross-project chat ingestion. Default is `1` (project-scoped chat only).
 
 ```bash
 BRAIN_SYNC_PROGRESS=0 npm run sync

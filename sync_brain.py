@@ -36,6 +36,12 @@ CODEX_SESSIONS_DIR = Path(
 ).expanduser()
 CHAT_SOURCE = os.getenv("BRAIN_CHAT_SOURCE", "auto").strip().lower()
 CHAT_ENABLED = os.getenv("BRAIN_INDEX_CHAT_HISTORY", "1").strip().lower() not in {"0", "false", "no", "off"}
+CHAT_PROJECT_ONLY = os.getenv("BRAIN_CHAT_PROJECT_ONLY", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 CHAT_MAX_ENTRIES = int(os.getenv("BRAIN_CHAT_MAX_ENTRIES", "1500"))
 CHAT_MAX_SESSIONS = int(os.getenv("BRAIN_CHAT_MAX_SESSIONS", "50"))
 CHAT_SUMMARY_WINDOW = int(os.getenv("BRAIN_CHAT_SUMMARY_WINDOW", "25"))
@@ -194,6 +200,16 @@ def digest_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
 
 
+def normalize_project_path(path) -> str:
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    try:
+        return str(Path(text).expanduser().resolve())
+    except Exception:
+        return str(Path(text).expanduser())
+
+
 def load_state() -> dict:
     try:
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -213,8 +229,11 @@ def extract_symbols(text: str):
     return pattern.findall(text)
 
 
-def parse_chat_history(path: Path, max_entries: int):
+def parse_chat_history(path: Path, max_entries: int, allowed_session_ids=None):
     entries = []
+    allowed = None
+    if allowed_session_ids is not None:
+        allowed = {str(item).strip() for item in allowed_session_ids if str(item).strip()}
     try:
         with path.open("r", encoding="utf-8", errors="ignore") as handle:
             for line in handle:
@@ -237,6 +256,8 @@ def parse_chat_history(path: Path, max_entries: int):
                     continue
                 if not session_id:
                     session_id = "unknown"
+                if allowed is not None and session_id not in allowed:
+                    continue
                 entries.append({"session_id": session_id, "ts": ts, "sort_ts": sort_ts, "text": f"user: {text}"})
     except OSError:
         return []
@@ -270,11 +291,9 @@ def sanitize_chat_text(text: str, max_chars: int = 12000) -> str:
     return "".join(cleaned).strip()
 
 
-def parse_codex_sessions(path: Path, max_entries: int, max_session_files: int):
-    entries = []
+def iter_codex_session_files(path: Path, max_session_files: int):
     if not path.exists():
-        return entries
-
+        return []
     files = []
     for session_file in path.rglob("*.jsonl"):
         try:
@@ -286,10 +305,35 @@ def parse_codex_sessions(path: Path, max_entries: int, max_session_files: int):
     files.sort(key=lambda item: item[0], reverse=True)
     if max_session_files > 0:
         files = files[:max_session_files]
+    return [session_file for _mtime, session_file in files]
 
-    for _, session_file in files:
+
+def _session_identity_from_record(record: dict, fallback_session_id: str) -> tuple[str, str]:
+    payload = record.get("payload") or {}
+    record_type = str(record.get("type", "")).strip()
+
+    if record_type == "session_meta":
+        session_id = str(payload.get("id", "")).strip() or fallback_session_id
+        cwd = str(payload.get("cwd", "")).strip()
+        return session_id, cwd
+
+    if record_type == "turn_context":
+        cwd = str(payload.get("cwd", "")).strip()
+        return fallback_session_id, cwd
+
+    return fallback_session_id, ""
+
+
+def load_project_session_ids(path: Path, max_session_files: int, project_root: Path) -> set[str]:
+    normalized_project_root = normalize_project_path(project_root)
+    if not normalized_project_root:
+        return set()
+
+    matching_session_ids = set()
+    for session_file in iter_codex_session_files(path, max_session_files):
         session_match = SESSION_ID_RE.search(session_file.name)
         session_id = session_match.group(1) if session_match else "unknown"
+        session_cwd = ""
         try:
             with session_file.open("r", encoding="utf-8", errors="ignore") as handle:
                 for line in handle:
@@ -300,9 +344,46 @@ def parse_codex_sessions(path: Path, max_entries: int, max_session_files: int):
                         record = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    if record.get("type") != "response_item":
+                    session_id, discovered_cwd = _session_identity_from_record(record, session_id)
+                    if discovered_cwd:
+                        session_cwd = discovered_cwd
+                        break
+        except OSError:
+            continue
+
+        if normalize_project_path(session_cwd) == normalized_project_root:
+            matching_session_ids.add(session_id)
+
+    return matching_session_ids
+
+
+def parse_codex_sessions(path: Path, max_entries: int, max_session_files: int, project_root=None):
+    entries = []
+    normalized_project_root = normalize_project_path(project_root)
+    matching_session_ids = set()
+
+    for session_file in iter_codex_session_files(path, max_session_files):
+        session_match = SESSION_ID_RE.search(session_file.name)
+        session_id = session_match.group(1) if session_match else "unknown"
+        session_cwd = ""
+        session_entries = []
+        try:
+            with session_file.open("r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
                         continue
 
+                    session_id, discovered_cwd = _session_identity_from_record(record, session_id)
+                    if discovered_cwd:
+                        session_cwd = discovered_cwd
+
+                    if record.get("type") != "response_item":
+                        continue
                     payload = record.get("payload") or {}
                     if payload.get("type") != "message":
                         continue
@@ -334,38 +415,62 @@ def parse_codex_sessions(path: Path, max_entries: int, max_session_files: int):
                     if not sort_ts:
                         sort_ts = int(time.time())
                     ts = max(-2147483648, min(2147483647, sort_ts))
-                    entries.append(
+                    session_entries.append(
                         {
                             "session_id": session_id,
                             "ts": ts,
                             "sort_ts": sort_ts,
                             "text": f"{role}: {message_text}",
+                            "session_cwd": normalize_project_path(session_cwd),
                         }
                     )
         except OSError:
             continue
 
+        if normalized_project_root and CHAT_PROJECT_ONLY:
+            if normalize_project_path(session_cwd) != normalized_project_root:
+                continue
+
+        matching_session_ids.add(session_id)
+        entries.extend(session_entries)
+
     entries.sort(key=lambda item: item.get("sort_ts", 0))
     if max_entries > 0 and len(entries) > max_entries:
         entries = entries[-max_entries:]
-    return entries
+    return entries, matching_session_ids
 
 
-def load_chat_entries():
+def load_chat_entries(project_root: Path):
     source = CHAT_SOURCE
     if source not in {"auto", "history", "sessions"}:
         source = "auto"
     max_session_entries = max(1, min(CHAT_MAX_ENTRIES, CHAT_MAX_SESSION_ENTRIES))
 
-    if source == "history":
-        return "history", parse_chat_history(CHAT_HISTORY_FILE, CHAT_MAX_ENTRIES)
-    if source == "sessions":
-        return "sessions", parse_codex_sessions(CODEX_SESSIONS_DIR, max_session_entries, CHAT_MAX_SESSION_FILES)
+    allowed_session_ids = None
+    if CHAT_PROJECT_ONLY:
+        allowed_session_ids = load_project_session_ids(CODEX_SESSIONS_DIR, CHAT_MAX_SESSION_FILES, project_root)
 
-    session_entries = parse_codex_sessions(CODEX_SESSIONS_DIR, max_session_entries, CHAT_MAX_SESSION_FILES)
+    if source == "history":
+        entries = parse_chat_history(CHAT_HISTORY_FILE, CHAT_MAX_ENTRIES, allowed_session_ids=allowed_session_ids)
+        return "history", entries
+    if source == "sessions":
+        entries, _session_ids = parse_codex_sessions(
+            CODEX_SESSIONS_DIR,
+            max_session_entries,
+            CHAT_MAX_SESSION_FILES,
+            project_root=project_root,
+        )
+        return "sessions", entries
+
+    session_entries, _session_ids = parse_codex_sessions(
+        CODEX_SESSIONS_DIR,
+        max_session_entries,
+        CHAT_MAX_SESSION_FILES,
+        project_root=project_root,
+    )
     if session_entries:
         return "sessions", session_entries
-    return "history", parse_chat_history(CHAT_HISTORY_FILE, CHAT_MAX_ENTRIES)
+    return "history", parse_chat_history(CHAT_HISTORY_FILE, CHAT_MAX_ENTRIES, allowed_session_ids=allowed_session_ids)
 
 
 def hash_chat_entries(source: str, entries) -> str:
@@ -755,7 +860,7 @@ def make_chat_summary(session_id: str, session_entries, previous_summary: str) -
     return local_chat_summary(session_id, session_entries)
 
 
-def upsert_chat_summary(collection, session_id: str, summary_text: str) -> None:
+def upsert_chat_summary(collection, session_id: str, summary_text: str, project_root: str) -> None:
     collection.upsert(
         ids=[f"chat:{session_id}::summary"],
         documents=[summary_text],
@@ -764,16 +869,17 @@ def upsert_chat_summary(collection, session_id: str, summary_text: str) -> None:
                 "source": f"chat:{session_id}",
                 "kind": "chat_summary",
                 "session_id": session_id,
+                "project_root": project_root,
                 "indexed_at": int(time.time()),
             }
         ],
     )
 
 
-def upsert_chat_summary_safe(collection, session_id: str, summary_text: str) -> None:
+def upsert_chat_summary_safe(collection, session_id: str, summary_text: str, project_root: str) -> None:
     for attempt in range(2):
         try:
-            upsert_chat_summary(collection, session_id, summary_text)
+            upsert_chat_summary(collection, session_id, summary_text, project_root)
             return
         except Exception as exc:
             if not is_recoverable_write_error(exc):
@@ -809,7 +915,9 @@ def index_chat_history(collection, previous_state: dict, current_state: dict):
         return 0, 0
 
     key = "__chat_history_hash__"
-    chat_source, entries = load_chat_entries()
+    project_root = Path(".").resolve()
+    normalized_project_root = normalize_project_path(project_root)
+    chat_source, entries = load_chat_entries(project_root)
     emit_status(f"Chat stage: loaded {len(entries)} entries from {chat_source}.")
     if not entries:
         current_state.pop(key, None)
@@ -856,6 +964,7 @@ def index_chat_history(collection, previous_state: dict, current_state: dict):
                     "source": f"chat:{session_id}",
                     "kind": "chat_log",
                     "session_id": session_id,
+                    "project_root": normalized_project_root,
                     "ts": ts,
                     "indexed_at": int(time.time()),
                 }
@@ -948,7 +1057,7 @@ def index_chat_history(collection, previous_state: dict, current_state: dict):
                     results.append((session_id, summary_text))
 
             for session_id, summary_text in results:
-                upsert_chat_summary_safe(collection, session_id, summary_text)
+                upsert_chat_summary_safe(collection, session_id, summary_text, normalized_project_root)
                 completed += 1
                 if not SYNC_IS_TTY or completed == total_to_generate:
                     emit_status(f"Chat summaries refreshed: {completed}/{total_to_generate}")
@@ -958,7 +1067,7 @@ def index_chat_history(collection, previous_state: dict, current_state: dict):
             sessions_to_generate, start=1
         ):
             summary_text = make_chat_summary(session_id, session_entries, previous_summary)
-            upsert_chat_summary_safe(collection, session_id, summary_text)
+            upsert_chat_summary_safe(collection, session_id, summary_text, normalized_project_root)
             completed += 1
             if not SYNC_IS_TTY or session_idx == total_to_generate:
                 emit_status(f"Chat summaries refreshed: {session_idx}/{total_to_generate}")

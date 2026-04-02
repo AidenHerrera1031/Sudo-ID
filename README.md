@@ -18,6 +18,7 @@ npm --version
 ```
 
 Version history is tracked in `CHANGELOG.md`. Every shipped update should bump the package version and add a changelog entry.
+Regression checks now live in `tests/` and can be run with `npm test` or `npm run check`.
 
 ## Install As A Reusable CLI App
 
@@ -99,6 +100,20 @@ Optional (higher-quality semantic embeddings, requires model download/network):
 pip install sentence-transformers
 ```
 
+### Validation
+
+Run the local regression suite:
+
+```bash
+npm test
+```
+
+Run the broader local check used by CI:
+
+```bash
+npm run check
+```
+
 ### 2. Add your API key in `.env`
 
 Recommended command:
@@ -122,6 +137,7 @@ Sync now shows file-level progress plus stage/status updates by default; disable
 Indexing now defaults to `BRAIN_SYNC_THROTTLE_MS=0` (no per-file delay). Increase it only if you need to lower local load.
 Chat summary generation supports parallel workers via `BRAIN_CHAT_SUMMARY_CONCURRENCY` (default `3`).
 When chat changes, summary refresh is incremental: unchanged sessions reuse their existing summaries.
+Chat indexing is now project-scoped by default: only Codex sessions whose recorded `cwd` matches the current project are ingested. Set `BRAIN_CHAT_PROJECT_ONLY=0` to restore global chat ingestion.
 If Chroma enters a write-corrupted state, `sync_brain.py` now auto-recovers by rebuilding the active collection and retrying a full sync.
 
 Embedding backend defaults to an offline local hasher so this works without Hugging Face access.
@@ -208,6 +224,7 @@ Default output mode is now `human` for cleaner readability.
 To disable chat-first summary ordering and use pure similarity ordering, set `BRAIN_CHAT_FIRST=0`.
 To force history-only chat ingestion, set `BRAIN_CHAT_SOURCE=history`.
 To force sessions-based ingestion, set `BRAIN_CHAT_SOURCE=sessions` (tune `BRAIN_CHAT_MAX_SESSION_FILES` and `BRAIN_CHAT_MAX_SESSION_ENTRIES` if needed).
+If you upgraded from older global chat behavior, rerun `brain sync` in each project to clear stale cross-project chat records from that project's local DB.
 To override the default config file location, set `BRAIN_CONFIG_FILE=/path/to/brain.toml`.
 
 ### 5. Save session memory notes

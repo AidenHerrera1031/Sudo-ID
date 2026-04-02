@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 from collections import OrderedDict
 from pathlib import Path
 
@@ -140,6 +141,102 @@ def looks_like_project_overview_query(query: str) -> bool:
         "repository overview",
     )
     return any(phrase in normalized for phrase in phrases)
+
+
+def normalize_query(query: str) -> str:
+    return " ".join(str(query or "").strip().lower().split())
+
+
+def extract_query_terms(query: str) -> list[str]:
+    normalized = normalize_query(query)
+    if not normalized:
+        return []
+    terms = []
+    seen = set()
+    for token in re.findall(r"[a-z0-9][a-z0-9._:/-]*", normalized):
+        if len(token) < 3 and not any(ch.isdigit() for ch in token):
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        terms.append(token)
+    return terms
+
+
+def looks_like_literal_lookup(query: str) -> bool:
+    normalized = normalize_query(query)
+    if not normalized:
+        return False
+    return (
+        " " not in normalized
+        or any(ch.isdigit() for ch in normalized)
+        or any(ch in "-_./:" for ch in normalized)
+    )
+
+
+def _query_signal_score(query: str, doc: str, meta) -> tuple[int, int, int, float]:
+    meta = meta or {}
+    normalized_query = normalize_query(query)
+    source = str(meta.get("source", "")).strip().lower()
+    text = f"{source}\n{doc or ''}".lower()
+    exact_match = 1 if normalized_query and normalized_query in text else 0
+    token_hits = sum(1 for token in extract_query_terms(query) if token in text)
+    source_match = 1 if normalized_query and normalized_query in source else 0
+    distance = meta.get("_distance")
+    try:
+        numeric_distance = float(distance)
+    except (TypeError, ValueError):
+        numeric_distance = float("inf")
+    return exact_match, token_hits, source_match, -numeric_distance
+
+
+def has_query_signal(query: str, docs, metas) -> bool:
+    normalized_query = normalize_query(query)
+    query_terms = extract_query_terms(query)
+    for idx, doc in enumerate(docs):
+        meta = metas[idx] if idx < len(metas) else {}
+        source = str((meta or {}).get("source", "")).strip().lower()
+        text = f"{source}\n{doc or ''}".lower()
+        if normalized_query and normalized_query in text:
+            return True
+        token_hits = sum(1 for token in query_terms if token in text)
+        if token_hits >= min(2, len(query_terms)) and token_hits > 0:
+            return True
+    return False
+
+
+def find_project_code_fallback(query: str, n_results: int):
+    docs, metas, dists = retrieve_context(
+        query,
+        max(n_results * 8, 20),
+        summaries_only=False,
+        scope="project",
+    )
+    scored = []
+    seen_sources = set()
+    for idx, doc in enumerate(docs):
+        meta = dict(metas[idx] if idx < len(metas) else {})
+        kind = str(meta.get("kind", "")).strip()
+        if kind not in {"code_or_docs", "file_summary", "project_identity", "decision_log"}:
+            continue
+        source = str(meta.get("source", "")).strip()
+        if source in seen_sources and kind != "code_or_docs":
+            continue
+        dist = dists[idx] if idx < len(dists) else None
+        meta["_distance"] = dist
+        exact_match, token_hits, source_match, distance_rank = _query_signal_score(query, doc, meta)
+        if exact_match <= 0 and token_hits <= 0 and source_match <= 0:
+            continue
+        code_bonus = 1 if kind == "code_or_docs" else 0
+        scored.append(((exact_match, token_hits, source_match, code_bonus, distance_rank), doc, meta, dist))
+        seen_sources.add(source)
+
+    if not scored:
+        return [], [], []
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    top = scored[:n_results]
+    return [item[1] for item in top], [item[2] for item in top], [item[3] for item in top]
 
 
 def project_overview_fallback() -> str:
@@ -539,6 +636,16 @@ def main():
         else:
             print("No summary context found. Run: python3 sync_brain.py (or use --include-code).")
         return
+
+    if (
+        not args.include_code
+        and args.scope != "chat"
+        and looks_like_literal_lookup(query)
+        and not has_query_signal(query, docs, metas)
+    ):
+        fallback_docs, fallback_metas, fallback_dists = find_project_code_fallback(query, args.top_k)
+        if fallback_docs:
+            docs, metas, dists = fallback_docs, fallback_metas, fallback_dists
 
     if args.raw_only:
         print(format_raw_context(query, docs, metas, dists))

@@ -1,10 +1,12 @@
 {
   "name": "sudo-id",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.4",
   "description": "Terminal-first Sudo-ID with local memory sidecar",
   "scripts": {
     "setup": "bash ./scripts/setup.sh",
+    "test": "bash ./scripts/with_python.sh -m unittest discover -s tests -v",
+    "check": "bash ./scripts/with_python.sh -m compileall -q . && bash ./scripts/with_python.sh -m unittest discover -s tests -v",
     "set-key": "bash ./scripts/set_openai_key.sh",
     "guide": "bash ./scripts/with_python.sh brain_cli.py start",
     "tui": "bash ./scripts/with_python.sh brain_cli.py tui",
